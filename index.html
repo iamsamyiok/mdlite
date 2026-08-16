@@ -52,13 +52,13 @@
     <h1>MDLite</h1>
     <p class="tag">极简 Markdown 编辑 / 查看器，单文件、零依赖</p>
     <div class="badges">
-      <span class="badge">体积 <b>89 KB</b></span>
+      <span class="badge">体积 <b>95 KB</b></span>
       <span class="badge">内存 <b>~3 MB</b></span>
       <span class="badge">单 exe · 无运行库</span>
       <span class="badge">Windows 10/11 · 64 位</span>
     </div>
     <a class="dl" id="dlbtn" href="#" onclick="return dl()">下载 MDLite.exe</a>
-    <p class="hint">89 KB · 下载后直接运行，无需安装</p>
+    <p class="hint">95 KB · 下载后直接运行，无需安装</p>
   </div>
 
   <div class="shots">
@@ -93,6 +93,10 @@
       <li>自动存档覆盖去重：连续 auto save 只保留最近 1 条</li>
       <li>恢复后防误存档：已归档内容相同不再重复提交</li>
       <li>配置按钮 + AI 设置对话框：Base URL / 模型 / Key / 超时</li>
+      <li>托盘常驻：关窗仅隐藏，托盘右键退出才真正关闭</li>
+      <li><kbd>/</kbd>命令后台执行：不锁编辑区，答案插入问题正下方</li>
+      <li><kbd>//</kbd>命令调用 opencode Agent（可配路径与提示词）</li>
+      <li>AI / Agent 回答首尾自动加 <code>---</code> 分隔线，可手动删除</li>
       <li><kbd>/</kbd>命令流式 AI：编辑器行首输入 / 后按 Enter 触发</li>
       <li>Esc 中断 AI 生成并关闭对话框</li>
     </ul>
@@ -108,7 +112,8 @@
       <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td><td>查找（Enter 下一个，Shift+Enter 上一个）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>,</kbd></td><td>设置（热键 / 自动保存间隔）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></td><td>全局热键：呼出 / 隐藏窗口</td></tr>
-      <tr><td>行首 <kbd>/</kbd> + <kbd>Enter</kbd></td><td>AI 问答流式插入（可 Esc 中断）</td></tr>
+      <tr><td>行首 <kbd>/</kbd> + <kbd>Enter</kbd></td><td>AI 问答后台流式插入（可 Esc 中断）</td></tr>
+      <tr><td>行首 <kbd>//</kbd> + <kbd>Enter</kbd></td><td>提交 opencode Agent 后台执行（可 Esc 中断）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></td><td>全局热键：呼出 / 隐藏窗口（默认，可改键）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + 滚轮</td><td>缩放 85% – 150%，共五档</td></tr>
       <tr><td><kbd>Tab</kbd></td><td>插入 4 空格缩进</td></tr>
@@ -134,7 +139,7 @@
       MDLite 用纯 C 和 Win32 原生 API 编写，界面与 Markdown 渲染全部使用 GDI 直绘，
       编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用零依赖 zlib stored 编码。
       <li>整个程序只链接 Windows 系统 DLL，没有浏览器内核、没有 Electron、没有 .NET 运行时，
-      因此体积只有 89 KB（含应用图标、git 引擎与 AI 流式模块），空文档内存占用约 2–3 MB。</li>
+      因此体积只有 95 KB（含应用图标、git 引擎、AI 流式与 Agent 模块），空文档内存占用约 2–3 MB。</li>
     </p>
   </div>
 
