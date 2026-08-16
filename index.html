@@ -52,13 +52,13 @@
     <h1>MDLite</h1>
     <p class="tag">极简 Markdown 编辑 / 查看器，单文件、零依赖</p>
     <div class="badges">
-      <span class="badge">体积 <b>99 KB</b></span>
+      <span class="badge">体积 <b>103 KB</b></span>
       <span class="badge">内存 <b>~3 MB</b></span>
       <span class="badge">单 exe · 无运行库</span>
       <span class="badge">Windows 10/11 · 64 位</span>
     </div>
     <a class="dl" id="dlbtn" href="#" onclick="return dl()">下载 MDLite.exe</a>
-    <p class="hint">99 KB · 下载后直接运行，无需安装</p>
+    <p class="hint">103 KB · 下载后直接运行，无需安装</p>
   </div>
 
   <div class="shots">
@@ -86,10 +86,12 @@
       <li><kbd>Ctrl</kbd>+<kbd>F</kbd> 查找，计数跳转</li>
       <li><kbd>Ctrl</kbd>+滚轮 五档缩放</li>
       <li>可配置全局热键（默认 Ctrl+Shift+Space）</li>
-      <li>可配置自动保存（10/30/60 秒）</li>
+      <li>可配置自动保存间隔（0–86400 秒，默认 60）</li>
       <li>记住窗口位置与缩放比例</li>
       <li>高 DPI 感知（Per-Monitor V2）</li>
-      <li>历史面板自绘：10 行 + 滚动条，本地时区显示</li>
+      <li>历史面板自绘：滚动条 + 本地时区显示，逐条删除</li>
+      <li>历史保留条数可配置（1–1000，默认 20），旧存档自动封存</li>
+      <li>「更多」菜单内置帮助：功能与热键速查</li>
       <li>自动存档覆盖去重：连续 auto save 只保留最近 1 条</li>
       <li>恢复后防误存档：已归档内容相同不再重复提交</li>
       <li>配置按钮 + AI 设置对话框：Base URL / 模型 / Key / 超时</li>
@@ -145,7 +147,7 @@
       MDLite 用纯 C 和 Win32 原生 API 编写，界面与 Markdown 渲染全部使用 GDI 直绘，
       编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用零依赖 zlib stored 编码。
       <li>整个程序只链接 Windows 系统 DLL，没有浏览器内核、没有 Electron、没有 .NET 运行时，
-      因此体积只有 99 KB（含应用图标、git 引擎、AI 流式、Agent 与 HTML 导出模块），空文档内存占用约 2–3 MB。</li>
+      因此体积只有 103 KB（含应用图标、git 引擎、AI 流式、Agent 与 HTML 导出模块），空文档内存占用约 2–3 MB。</li>
     </p>
   </div>
 
