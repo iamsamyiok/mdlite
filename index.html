@@ -52,13 +52,13 @@
     <h1>MDLite</h1>
     <p class="tag">极简 Markdown 编辑 / 查看器，单文件、零依赖</p>
     <div class="badges">
-      <span class="badge">体积 <b>106 KB</b></span>
+      <span class="badge">体积 <b>108 KB</b></span>
       <span class="badge">内存 <b>~3 MB</b></span>
       <span class="badge">单 exe · 无运行库</span>
       <span class="badge">Windows 10/11 · 64 位</span>
     </div>
     <a class="dl" id="dlbtn" href="#" onclick="return dl()">下载 MDLite.exe</a>
-    <p class="hint">106 KB · 下载后直接运行，无需安装</p>
+    <p class="hint">108 KB · 下载后直接运行，无需安装</p>
   </div>
 
   <div class="shots">
@@ -78,6 +78,7 @@
       <li>有序 / 无序列表、嵌套缩进</li>
       <li>代码块（灰底圆角、Tab 展开）</li>
       <li>自动换行、超长串硬折行</li>
+      <li>编辑器当前行高亮（淡蓝带，设置可关）</li>
       <li>UTF-8 读写（兼容 BOM）</li>
       <li>拖拽 .md 文件到窗口打开</li>
       <li>命令行传参：MDLite.exe note.md</li>
@@ -107,6 +108,7 @@
       <li>AI / Agent 执行中显示实时计时（mm:ss），Esc 取消</li>
       <li>一键导出 / 复制 HTML：独立样式页，与预览渲染同语法</li>
       <li>单实例守卫：二次启动自动唤起已有窗口</li>
+      <li>Wine 兼容：中文界面在 Wine/Linux 下自动切换内置 CJK 字体，无空心框乱码</li>
     </ul>
   </div>
 
@@ -148,7 +150,7 @@
       MDLite 用纯 C 和 Win32 原生 API 编写，界面与 Markdown 渲染全部使用 GDI 直绘，
       编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用零依赖 zlib stored 编码。
       <li>整个程序只链接 Windows 系统 DLL，没有浏览器内核、没有 Electron、没有 .NET 运行时，
-      因此体积只有 106 KB（含应用图标、git 引擎、AI 流式、Agent 与 HTML 导出模块），空文档内存占用约 2–3 MB。</li>
+      因此体积只有 108 KB（含应用图标、git 引擎、AI 流式、Agent 与 HTML 导出模块），空文档内存占用约 2–3 MB。</li>
     </p>
   </div>
 
