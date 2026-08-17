@@ -98,7 +98,8 @@ typedef struct RunBuf {
     int n, cap;
 } RunBuf;
 
-static void push_run(RunBuf *b, const wchar_t *p, int len, int flags)
+static void push_run(RunBuf *b, const wchar_t *p, int len, int flags,
+                    const wchar_t *url, int urlLen)
 {
     if (len <= 0) return;
     if (b->n == b->cap) {
@@ -108,6 +109,8 @@ static void push_run(RunBuf *b, const wchar_t *p, int len, int flags)
     b->v[b->n].ptr = p;
     b->v[b->n].len = len;
     b->v[b->n].flags = flags;
+    b->v[b->n].url = url;
+    b->v[b->n].urlLen = urlLen;
     b->n++;
 }
 
@@ -131,7 +134,7 @@ static int match_marker(const wchar_t *s, int len, const wchar_t *m)
 /* match "[text](url)" starting at s[0]=='['; fills content range,
    returns total consumed length or 0 */
 static int match_link(const wchar_t *s, int len, int *contentStart,
-                      int *contentLen)
+                      int *contentLen, int *urlStart, int *urlLen)
 {
     int i = 1, depth = 1;
     while (i < len && depth) {
@@ -150,11 +153,13 @@ static int match_link(const wchar_t *s, int len, int *contentStart,
     if (j >= len) return 0;
     *contentStart = 1;
     *contentLen = closeEnd - 2;
+    *urlStart = closeEnd + 1;
+    *urlLen = j - closeEnd - 1;
     return j + 1;
 }
 
 static void parse_inline(const wchar_t *s, int len, int flags, int depth,
-                         RunBuf *out)
+                         RunBuf *out, const wchar_t *url, int urlLen)
 {
     int i = 0;
     while (i < len) {
@@ -165,8 +170,9 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
             int j = i + 1;
             while (j < len && s[j] != L'`') j++;
             if (j < len && j > i + 1) {
-                if (i > 0) push_run(out, s, i, flags);
-                push_run(out, s + i + 1, j - i - 1, flags | RF_CODE);
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                push_run(out, s + i + 1, j - i - 1, flags | RF_CODE,
+                         NULL, 0);
                 s += j + 1; len -= j + 1; i = 0;
                 matched = 1;
             }
@@ -174,8 +180,9 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
         else if (depth < 3 && c == L'*' && i + 1 < len && s[i+1] == L'*') {
             int m = match_marker(s + i, len - i, L"**");
             if (m > 4) {
-                if (i > 0) push_run(out, s, i, flags);
-                parse_inline(s + i + 2, m - 4, flags | RF_BOLD, depth + 1, out);
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                parse_inline(s + i + 2, m - 4, flags | RF_BOLD, depth + 1,
+                             out, url, urlLen);
                 i += m; s += i; len -= i; i = 0;
                 matched = 1;
             }
@@ -184,8 +191,9 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
                  && !iswspace(s[i+1])) {
             int m = match_marker(s + i, len - i, L"*");
             if (m > 2) {
-                if (i > 0) push_run(out, s, i, flags);
-                parse_inline(s + i + 1, m - 2, flags | RF_ITALIC, depth + 1, out);
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                parse_inline(s + i + 1, m - 2, flags | RF_ITALIC, depth + 1,
+                             out, url, urlLen);
                 i += m; s += i; len -= i; i = 0;
                 matched = 1;
             }
@@ -193,20 +201,23 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
         else if (depth < 3 && c == L'~' && i + 1 < len && s[i+1] == L'~') {
             int m = match_marker(s + i, len - i, L"~~");
             if (m > 4) {
-                if (i > 0) push_run(out, s, i, flags);
-                parse_inline(s + i + 2, m - 4, flags | RF_STRIKE, depth + 1, out);
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                parse_inline(s + i + 2, m - 4, flags | RF_STRIKE, depth + 1,
+                             out, url, urlLen);
                 i += m; s += i; len -= i; i = 0;
                 matched = 1;
             }
         }
         else if (c == L'[' || (c == L'!' && i + 1 < len && s[i+1] == L'[')) {
             int off = (c == L'!') ? 1 : 0;
-            int cs = 0, cl = 0;
-            int m = match_link(s + i + off, len - i - off, &cs, &cl);
+            int cs = 0, cl = 0, us = 0, ul = 0;
+            const wchar_t *base = s + i + off;
+            int m = match_link(base, len - i - off, &cs, &cl, &us, &ul);
             if (m > 0) {
-                if (i > 0) push_run(out, s, i, flags);
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
                 int lf = flags | (off ? RF_IMAGE : RF_LINK);
-                parse_inline(s + i + off + cs, cl, lf, depth + 1, out);
+                parse_inline(s + i + off + cs, cl, lf, depth + 1, out,
+                             off ? NULL : base + us, off ? 0 : ul);
                 i += off + m; s += i; len -= i; i = 0;
                 matched = 1;
             }
@@ -214,7 +225,7 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
 
         if (!matched) i++;
     }
-    if (len > 0) push_run(out, s, len, flags);
+    if (len > 0) push_run(out, s, len, flags, url, urlLen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -331,12 +342,14 @@ static void wrap_line(MDLine *L, RunBuf *rb, const MDFonts *f, HDC hdc,
     }
 
     /* expand runs into tokens: words and space gaps, flags preserved */
-    typedef struct Tok { const wchar_t *ptr; int len; int flags; int isSpace; int wid; } Tok;
+    typedef struct Tok { const wchar_t *ptr; int len; int flags; int isSpace; int wid;
+                          const wchar_t *url; int urlLen; } Tok;
     Tok *t = NULL;
     int nt = 0, tcap = 0;
     for (int r = 0; r < rb->n; r++) {
         const wchar_t *p = rb->v[r].ptr;
         int len = rb->v[r].len, flags = rb->v[r].flags;
+        const wchar_t *url = rb->v[r].url; int urlLen = rb->v[r].urlLen;
         HFONT fo = font_for(f, flags, hl);
         int i = 0;
         while (i < len) {
@@ -351,6 +364,8 @@ static void wrap_line(MDLine *L, RunBuf *rb, const MDFonts *f, HDC hdc,
             t[nt].len = j - i;
             t[nt].flags = flags;
             t[nt].isSpace = isSp;
+            t[nt].url = url;
+            t[nt].urlLen = urlLen;
             t[nt].wid = text_w(hdc, fo, p + i, j - i);
             nt++;
             i = j;
@@ -363,7 +378,8 @@ static void wrap_line(MDLine *L, RunBuf *rb, const MDFonts *f, HDC hdc,
         if (t[i].isSpace) {
             if (x == 0) { i++; continue; }              /* swallow line-leading */
             if (x + t[i].wid <= availW) {
-                push_run(&cur, t[i].ptr, t[i].len, t[i].flags);
+                push_run(&cur, t[i].ptr, t[i].len, t[i].flags,
+                             t[i].url, t[i].urlLen);
                 x += t[i].wid;
                 i++;
                 continue;
@@ -396,7 +412,8 @@ static void wrap_line(MDLine *L, RunBuf *rb, const MDFonts *f, HDC hdc,
             x = 0;
             continue;                                    /* remainder re-enters */
         }
-        push_run(&cur, t[i].ptr, t[i].len, t[i].flags);
+        push_run(&cur, t[i].ptr, t[i].len, t[i].flags,
+                             t[i].url, t[i].urlLen);
         x += wid;
         i++;
     }
@@ -470,7 +487,7 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
             } else {
                 L = push_line(doc, LT_CODE);
                 L->code = codeId;
-                push_run(&rb, s, len, RF_CODE);
+                push_run(&rb, s, len, RF_CODE, NULL, 0);
                 int ch = f->monoH + (f->monoH >> 2);
                 wrap_line(L, &rb, f, hdc, contentW - 24, ch, 0);
                 L->height = 0;
@@ -550,7 +567,7 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
         L = push_line(doc, LT_TEXT);
 
     have_line:
-        parse_inline(s, len, 0, 0, &rb);
+        parse_inline(s, len, 0, 0, &rb, NULL, 0);
         wrap_line(L, &rb, f, hdc,
                   contentW - (L->type == LT_QUOTE ? 20 : 0), lineH,
                   headingLevel);
@@ -587,6 +604,16 @@ void md_free(MDDoc *doc)
 /* painting                                                            */
 /* ------------------------------------------------------------------ */
 
+/* link hit-rect reporting (set by host for clickable links) */
+static MdLinkSink g_linkSink;
+static void      *g_linkCtx;
+
+void md_set_link_sink(MdLinkSink cb, void *ctx)
+{
+    g_linkSink = cb;
+    g_linkCtx = ctx;
+}
+
 static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
                       const MDFonts *f, COLORREF defCol, int hl)
 {
@@ -599,6 +626,13 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
         GetTextMetricsW(hdc, &tm);
         int w = text_w(hdc, fo, r->ptr, r->len);
         int ry = y + (sub->height - tm.tmHeight) / 2;
+
+        /* report clickable link rect to the host */
+        if ((r->flags & RF_LINK) && g_linkSink && r->url && r->urlLen > 0
+            && r->urlLen < 4096) {
+            RECT lrc = { x, ry, x + w, ry + tm.tmHeight };
+            g_linkSink(g_linkCtx, lrc, r->url, r->urlLen);
+        }
 
         if (r->flags & RF_CODE) {
             RECT rc = { x, ry, x + w + 4, ry + tm.tmHeight };

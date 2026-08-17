@@ -31,6 +31,8 @@ typedef struct MDRun {
     const wchar_t *ptr;  /* points into MDDoc.text (not NUL terminated) */
     int len;
     int flags;
+    const wchar_t *url;  /* link target (points into text), NULL if none */
+    int urlLen;
 } MDRun;
 
 /* one visual sub-line produced by word wrapping */
@@ -83,6 +85,12 @@ int md_to_html(const wchar_t *src, int srcLen, char **out);
 /* paint visible portion; rc is the target client area */
 void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
               const MDFonts *f);
+
+/* link hit-rect sink: when set, md_paint reports every visible link's
+ * client rect + target. Used for clickable links in preview mode. */
+typedef void (*MdLinkSink)(void *ctx, RECT rc, const wchar_t *url,
+                           int urlLen);
+void md_set_link_sink(MdLinkSink cb, void *ctx);
 
 /* theme colors (set by main.c, kept here as externs for simplicity) */
 extern COLORREF g_colText, g_colHeading, g_colQuote, g_colCodeBg,

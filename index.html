@@ -52,13 +52,13 @@
     <h1>MDLite</h1>
     <p class="tag">极简 Markdown 编辑 / 查看器，单文件、零依赖</p>
     <div class="badges">
-      <span class="badge">体积 <b>106 KB</b></span>
+      <span class="badge">体积 <b>118 KB</b></span>
       <span class="badge">内存 <b>~3 MB</b></span>
       <span class="badge">单 exe · 无运行库</span>
       <span class="badge">Windows 10/11 · 64 位</span>
     </div>
     <a class="dl" id="dlbtn" href="#" onclick="return dl()">下载 MDLite.exe</a>
-    <p class="hint">106 KB · 下载后直接运行，无需安装</p>
+    <p class="hint">118 KB · 下载后直接运行，无需安装</p>
   </div>
 
   <div class="shots">
@@ -108,6 +108,15 @@
       <li>一键导出 / 复制 HTML：独立样式页，与预览渲染同语法</li>
       <li>单实例守卫：二次启动自动唤起已有窗口</li>
       <li>Wine 兼容：中文界面在 Wine/Linux 下自动切换内置 CJK 字体，无空心框乱码</li>
+      <li>回车自动继承上一行缩进（设置可关）</li>
+      <li>最近文件子菜单：一键重开，失效路径自动清理</li>
+      <li>历史条目可钉住：置顶分组常驻，重启不丢</li>
+      <li><kbd>Ctrl</kbd>+<kbd>J</kbd> 选区 AI：润色 / 翻译 / 总结 / 解释 / 自定义指令</li>
+      <li>打印与 PDF 导出：A4 分页排版，走系统打印对话框</li>
+      <li>导出纯文本：剥离全部 Markdown 标记，Notepad 直接可读</li>
+      <li>便携模式：exe 旁放一个 mdlite.ini 即全量随身配置</li>
+      <li>窗口置顶开关：写文档查资料两不误</li>
+      <li>预览 / 分栏中链接可点击（手型光标 + ShellExecute）</li>
     </ul>
   </div>
 
@@ -124,6 +133,7 @@
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></td><td>全局热键：呼出 / 隐藏窗口</td></tr>
       <tr><td>行首 <kbd>/</kbd> + <kbd>Enter</kbd></td><td>AI 问答后台流式插入（可 Esc 中断）</td></tr>
       <tr><td>行首 <kbd>//</kbd> + <kbd>Enter</kbd></td><td>提交 opencode Agent 后台执行（可 Esc 中断）</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>J</kbd></td><td>选区 AI 指令菜单（需先选中文字）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></td><td>全局热键：呼出 / 隐藏窗口（默认，可改键）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + 滚轮</td><td>缩放 85% – 150%，共五档</td></tr>
       <tr><td><kbd>Tab</kbd></td><td>插入 4 空格缩进</td></tr>
@@ -149,7 +159,7 @@
       MDLite 用纯 C 和 Win32 原生 API 编写，界面与 Markdown 渲染全部使用 GDI 直绘，
       编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用零依赖 zlib stored 编码。
       <li>整个程序只链接 Windows 系统 DLL，没有浏览器内核、没有 Electron、没有 .NET 运行时，
-      因此体积只有 106 KB（含应用图标、git 引擎、AI 流式、Agent 与 HTML 导出模块），空文档内存占用约 2–3 MB。</li>
+      因此体积只有 118 KB（含应用图标、git 引擎、AI 流式、Agent、打印与便携配置模块），空文档内存占用约 2–3 MB。</li>
     </p>
   </div>
 
