@@ -121,9 +121,11 @@ void md_free(MDDoc *doc);
  * returns byte length; *out is malloc'd, caller frees. 0 on error. */
 int md_to_html(const wchar_t *src, int srcLen, char **out);
 
-/* paint visible portion; rc is the target client area */
+/* paint visible portion; rc is the target client area.
+ * docPath is the directory of the current document (images are resolved
+ * relative to it); pass NULL or "" when there is no document path. */
 void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
-              const MDFonts *f);
+              const MDFonts *f, const wchar_t *docPath);
 
 /* link hit-rect sink: when set, md_paint reports every visible link's
  * client rect + target. Used for clickable links in preview mode. */

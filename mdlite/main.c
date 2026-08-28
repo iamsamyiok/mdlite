@@ -42,6 +42,8 @@ static int    g_view;     /* VIEW_EDIT / VIEW_SPLIT / VIEW_PREVIEW */
 static MDDoc  g_doc;
 static int    g_scrollY;
 static BOOL   g_splitDrag;  /* dragging the split preview scrollbar */
+static HMODULE g_hRichEd = NULL;   /* msftedit.dll handle (RichEdit50W) */
+static BOOL   g_useRichEd = FALSE; /* TRUE if RichEdit loaded successfully */
 
 wchar_t g_path[MAX_PATH] = L"";
 wchar_t g_name[MAX_PATH] = L"";
@@ -196,6 +198,19 @@ static void CreateUiFonts(void)
 
     md_init_fonts(&g_fonts, dc, fdpi);
     ReleaseDC(g_hwnd, dc);
+}
+
+/* Attempt to load RichEdit50W; returns TRUE on success. Falls back to EDIT. */
+static BOOL InitRichEdit(void)
+{
+    if (g_hRichEd) return TRUE;
+    g_hRichEd = LoadLibraryW(L"msftedit.dll");
+    if (!g_hRichEd) return FALSE;
+    /* RegisterClassEx must be called with the RichEdit class name after loading.
+     * Win32 does this automatically on first CreateWindow("RichEdit50W"),
+     * so we just set the flag. */
+    g_useRichEd = TRUE;
+    return TRUE;
 }
 
 static void ApplyEditPadding(void)
@@ -2338,19 +2353,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         g_hwnd = hwnd;
-        g_edit = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE
-            | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
-            0, 0, 0, 0, hwnd, (HMENU)1, NULL, NULL);
+         g_edit = CreateWindowExW(0,
+             g_useRichEd ? L"RichEdit50W" : L"EDIT", L"",
+             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE
+             | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL
+             | (g_useRichEd ? 0 : 0),
+             0, 0, 0, 0, hwnd, (HMENU)1, NULL, NULL);
         /* multiline edit caps at 64K chars by default; long AI sessions
          * would silently drop inserts past the limit */
         SendMessageW(g_edit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
         g_editProc = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC,
                                                 (LONG_PTR)EditProc);
-        HDC dc = GetDC(hwnd);
-        g_dpi = GetDeviceCaps(dc, LOGPIXELSX);
-        ReleaseDC(hwnd, dc);
-        CreateUiFonts();
+         HDC dc = GetDC(hwnd);
+         g_dpi = GetDeviceCaps(dc, LOGPIXELSX);
+         ReleaseDC(hwnd, dc);
+         InitRichEdit();
+         CreateUiFonts();
         SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_fontEdit, TRUE);
         SendMessageW(g_edit, EM_SETLIMITTEXT, 0, 0);
         DragAcceptFiles(hwnd, TRUE);
@@ -2414,14 +2432,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_view == VIEW_PREVIEW) {
             RECT rcView = { 0, 0, w, h };
             FillRect(mem, &rcView, (HBRUSH)GetStockObject(WHITE_BRUSH));
-            md_paint(&g_doc, mem, &rcBody, g_scrollY, &g_fonts);
+            md_paint(&g_doc, mem, &rcBody, g_scrollY, &g_fonts, g_path);
         } else if (g_view == VIEW_SPLIT) {
             RECT rcPrev;
             PreviewRect(&rcPrev);
             RECT rcWhite = { rcPrev.left, rcPrev.top, rcPrev.right + 1,
                              rcPrev.bottom };
             FillRect(mem, &rcWhite, (HBRUSH)GetStockObject(WHITE_BRUSH));
-            md_paint(&g_doc, mem, &rcPrev, g_scrollY, &g_fonts);
+            md_paint(&g_doc, mem, &rcPrev, g_scrollY, &g_fonts, g_path);
             /* divider gutter */
             RECT rcDiv = { rcPrev.right + 1, rcPrev.top,
                            rcPrev.right + 2, rcPrev.bottom };
@@ -2852,6 +2870,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         UnregisterHotKey(hwnd, HOTKEY_SHOW);
         SaveSettings();
         md_free(&g_doc);
+        if (g_hRichEd) FreeLibrary(g_hRichEd);
         PostQuitMessage(0);
         return 0;
     }

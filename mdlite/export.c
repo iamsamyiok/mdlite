@@ -319,7 +319,7 @@ void DoPrint(void)
         if (pages < 1) pages = 1;
         for (int p = 0; p < pages; p++) {
             StartPage(dc);
-            md_paint(&doc, dc, &page, p * pageH, &pf);
+            md_paint(&doc, dc, &page, p * pageH, &pf, NULL);
             EndPage(dc);
         }
         EndDoc(dc);

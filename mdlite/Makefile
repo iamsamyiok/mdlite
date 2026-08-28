@@ -1,7 +1,7 @@
 CC      = x86_64-w64-mingw32-gcc
 CFLAGS  = -Os -Wall -Wextra -std=c99 -municode -DUNICODE -D_UNICODE
 LDFLAGS = -mwindows -Wl,-s
-LIBS    = -lgdi32 -lcomdlg32 -lshell32 -lshlwapi -luser32 -ladvapi32 -lwinhttp -lmsimg32
+LIBS    = -lgdi32 -lcomdlg32 -lshell32 -lshlwapi -luser32 -ladvapi32 -lwinhttp -lmsimg32 -lole32 -lwindowscodecs
 
 all: MDLite.exe
 

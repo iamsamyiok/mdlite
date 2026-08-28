@@ -1,9 +1,75 @@
 /* MDLite - markdown parser + GDI renderer */
+#define WIDL_C_INLINE_WRAPPERS 0
 #include "markdown.h"
 #include <stdlib.h>
 #include <string.h>
 #include <wctype.h>
 #include <wchar.h>
+#include <wincodec.h>
+
+/* single-thread WIC factory, initialized on first use */
+static IWICImagingFactory *g_wicFactory = NULL;
+static BOOL g_wicOk = FALSE;
+
+static BOOL InitWic(void)
+{
+    if (g_wicOk) return TRUE;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (hr != S_OK && hr != S_FALSE) return FALSE;
+    hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_IWICImagingFactory, (void**)&g_wicFactory);
+    if (FAILED(hr) || !g_wicFactory) return FALSE;
+    g_wicOk = TRUE;
+    return TRUE;
+}
+
+/* load a local image to an HBITMAP via WIC; outHbm must be DeleteObject'd.
+ * maxPx > 0 caps the rendered width; pass 0 for no cap. */
+static BOOL LoadWicBitmap(HDC hdc, const wchar_t *path,
+                          HBITMAP *outHbm, int *outW, int *outH, int maxPx)
+{
+    if (!InitWic() || !g_wicFactory) return FALSE;
+    IWICBitmapDecoder *dec = NULL;
+    HRESULT hr = g_wicFactory->lpVtbl->CreateDecoderFromFilename(
+        g_wicFactory, path, NULL, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &dec);
+    if (FAILED(hr) || !dec) return FALSE;
+    IWICBitmapFrameDecode *frame = NULL;
+    hr = dec->lpVtbl->GetFrame(dec, 0, &frame);
+    if (FAILED(hr) || !frame) { dec->lpVtbl->Release(dec); return FALSE; }
+    UINT pw = 0, ph = 0;
+    hr = frame->lpVtbl->GetSize(frame, &pw, &ph);
+    if (FAILED(hr)) { frame->lpVtbl->Release(frame); dec->lpVtbl->Release(dec); return FALSE; }
+    int w = (int)pw, h = (int)ph;
+    if (maxPx > 0 && w > maxPx) { h = h * maxPx / w; w = maxPx; }
+    IWICFormatConverter *fc = NULL;
+    hr = g_wicFactory->lpVtbl->CreateFormatConverter(g_wicFactory, &fc);
+    if (FAILED(hr) || !fc) { frame->lpVtbl->Release(frame); dec->lpVtbl->Release(dec); return FALSE; }
+    hr = fc->lpVtbl->Initialize(fc, (IWICBitmapSource*)frame, &GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeMedianCut);
+    if (FAILED(hr)) { fc->lpVtbl->Release(fc); frame->lpVtbl->Release(frame); dec->lpVtbl->Release(dec); return FALSE; }
+    HDC hdcMem = CreateCompatibleDC(hdc);
+    if (!hdcMem) { fc->lpVtbl->Release(fc); frame->lpVtbl->Release(frame); dec->lpVtbl->Release(dec); return FALSE; }
+    BITMAPINFO bi; ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void *bits = NULL;
+    HBITMAP hbm = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hbm) { DeleteDC(hdcMem); fc->lpVtbl->Release(fc); frame->lpVtbl->Release(frame); dec->lpVtbl->Release(dec); return FALSE; }
+    HBITMAP old = (HBITMAP)SelectObject(hdcMem, hbm);
+    UINT stride = (UINT)w * 4u;
+    UINT size   = stride * (UINT)h;
+    fc->lpVtbl->CopyPixels(fc, NULL, stride, size, (BYTE*)bits);
+    SelectObject(hdcMem, old);
+    DeleteDC(hdcMem);
+    fc->lpVtbl->Release(fc);
+    frame->lpVtbl->Release(frame);
+    dec->lpVtbl->Release(dec);
+    if (!bits) return FALSE;
+    *outHbm = hbm; *outW = w; *outH = h;
+    return TRUE;
+}
 
 
 /* Apple-style palette (macOS system colors) */
@@ -1056,6 +1122,8 @@ void md_free(MDDoc *doc)
 /* link hit-rect reporting (set by host for clickable links) */
 static MdLinkSink g_linkSink;
 static void      *g_linkCtx;
+/* current doc dir for resolving image paths */
+static wchar_t    g_docPath[MAX_PATH];
 
 void md_set_link_sink(MdLinkSink cb, void *ctx)
 {
@@ -1113,6 +1181,28 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
             DeleteObject(br);
         }
 
+        /* image: load and composite the bitmap */
+        if (r->flags & RF_IMAGE && r->url && r->urlLen > 0
+            && r->urlLen < 4096) {
+            wchar_t imgPath[MAX_PATH];
+            if (g_docPath[0])
+                wsprintfW(imgPath, L"%s\\%.*S", g_docPath, r->urlLen, r->url);
+            else
+                lstrcpynW(imgPath, r->url, MAX_PATH);
+            HBITMAP hbm = NULL; int iw = 0, ih = 0;
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            if (hdcMem && LoadWicBitmap(hdc, imgPath, &hbm, &iw, &ih, 1280)) {
+                RECT ir = { x, ry + 2, x + w, ry + tmH };
+                if (iw > 0 && ih > 0)
+                    StretchBlt(hdc, ir.left, ir.top, ir.right - ir.left,
+                               ir.bottom - ir.top, hdcMem, 0, 0, iw, ih, SRCCOPY);
+                DeleteObject(hbm);
+            }
+            if (hdcMem) DeleteDC(hdcMem);
+            x += w + (r->flags & RF_CODE ? 4 : 0);
+            continue;
+        }
+
         SetTextColor(hdc, col);
         ExtTextOutW(hdc, x + (r->flags & RF_CODE ? 2 : 0), ry, 0, NULL,
                     r->ptr, r->len, NULL);
@@ -1131,9 +1221,14 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
 }
 
 void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
-              const MDFonts *f)
+              const MDFonts *f, const wchar_t *docPath)
 {
     if (!doc || !doc->lines) return;
+    /* cache the doc path so draw_runs can resolve relative image paths */
+    if (docPath)
+        lstrcpynW(g_docPath, docPath, MAX_PATH);
+    else
+        g_docPath[0] = 0;
 
     FillRect(hdc, rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
 

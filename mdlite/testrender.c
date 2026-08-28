@@ -66,7 +66,7 @@ int main(void)
     SelectObject(mem, dib);
 
     RECT rc = { 0, 0, W, H };
-    md_paint(&doc, mem, &rc, 0, &f);
+    md_paint(&doc, mem, &rc, 0, &f, NULL);
 
     int codeBg = count_color(bits, 40, 0, W - 40, H, RGB(0xF5,0xF5,0xF7));
     expect(codeBg > 200, "code background painted");
@@ -110,7 +110,7 @@ int main(void)
     dib = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
     mem = CreateCompatibleDC(0);
     SelectObject(mem, dib);
-    md_paint(&doc, mem, &rc, 0, &f);
+    md_paint(&doc, mem, &rc, 0, &f, NULL);
 
     /* header row fill must appear (gray band wider than glyph noise) */
     int hdrFill = count_color(bits, 40, 0, W - 40, doc.height,
@@ -120,6 +120,21 @@ int main(void)
     int acc = count_color(bits, 24, 0, W - 24, doc.height, RGB(0x00,0x7A,0xFF));
     expect(acc > 10, "task checkbox accent painted");
 
+    DeleteDC(mem);
+    DeleteObject(dib);
+    md_free(&doc);
+
+    /* ---- image rendering (requires i.png) ---- */
+    const wchar_t *md3 = L"![x](i.png)\n";
+    ZeroMemory(&doc, sizeof(doc));
+    md_build(&doc, md3, lstrlenW(md3), &f, sdc, W);
+    bits = NULL;
+    dib = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+    mem = CreateCompatibleDC(0);
+    SelectObject(mem, dib);
+    md_paint(&doc, mem, &rc, 0, &f, L"");
+    /* just verify no crash; image may fail if file absent */
+    expect(doc.height > 0, "image doc renders without crash");
     DeleteDC(mem);
     DeleteObject(dib);
     md_free(&doc);
