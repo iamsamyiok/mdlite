@@ -89,6 +89,10 @@ static BOOL   g_findShown;
 static wchar_t g_findQuery[128] = L"";
 static wchar_t g_findInfo[64]   = L"";
 
+/* draft recovery */
+static BOOL g_draftSaved = FALSE;
+static DWORD g_lastDraftTick = 0;
+
 /* replace bar (shares the find row) */
 static HWND   g_replEdit;
 static WNDPROC g_replProc;
@@ -133,6 +137,8 @@ static void CfgSetStr(const wchar_t *name, const wchar_t *v);
 void PathHash(const wchar_t *path, wchar_t *out);
 void StartAi(const wchar_t *question);
 void ShowSelAiMenu(void);
+static BOOL TryRestoreDraft(void);
+static BOOL WriteDraft(void);
 
 static void GetBodyRect(RECT *rc)
 {
@@ -555,6 +561,9 @@ static BOOL DoSaveEx(BOOL isAuto)
             MessageBoxW(g_hwnd, L"保存失败。", APP_NAME, MB_ICONERROR);
         return FALSE;
     }
+    /* once a document is saved, draft is no longer relevant */
+    if (isAuto) WriteDraft();
+    g_draftSaved = FALSE;
     return TRUE;
 }
 
@@ -589,6 +598,7 @@ static void DoNew(void)
     g_dirty = FALSE;
     g_eolLF = TRUE;
     g_bomUtf8 = FALSE;
+    g_draftSaved = FALSE;
     UpdateTitle();
 }
 
@@ -2362,6 +2372,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         lstrcpynW(g_nid.szTip, APP_NAME, 128);
         g_trayOn = Shell_NotifyIconW(NIM_ADD, &g_nid);
         md_set_link_sink(LinkSink, NULL);
+        TryRestoreDraft();
         if (g_topmost)
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE);
@@ -2740,6 +2751,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_dirty && g_path[0] && !g_aiBusy && !g_agBusy) {
                 if (DoSaveEx(TRUE))
                     InvalidateRect(hwnd, NULL, FALSE);
+            } else if (g_dirty && !g_path[0]
+                       && !g_aiBusy && !g_agBusy
+                       && GetTickCount() - g_lastDraftTick > 5000) {
+                WriteDraft();
             }
             return 0;
         }
@@ -3496,6 +3511,86 @@ static void LoadExtraSettings(void)
     for (int i = 0; i < 6; i++)
         CfgGetStr(strs[i].name, strs[i].v, strs[i].cch);
     MruLoad();
+}
+
+/* draft file path: <exe dir>\\mdlite\\draft.txt */
+static void DraftPath(wchar_t *out, int cch)
+{
+    wchar_t exe[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) { out[0] = 0; return; }
+    wchar_t *slash = exe;
+    for (wchar_t *p = exe; *p; p++)
+        if (*p == L'\\' || *p == L'/') slash = p;
+    *++slash = 0;
+    lstrcpynW(out, exe, cch);
+    lstrcatW(out, L"mdlite");
+    CreateDirectoryW(out, NULL);
+    lstrcatW(out, L"\\draft.txt");
+}
+
+/* write the current editor content to the draft file. returns FALSE on failure */
+static BOOL WriteDraft(void)
+{
+    if (!g_dirty || !g_hwnd) return TRUE;
+    int len = GetWindowTextLengthW(g_edit);
+    if (len <= 0) { DeleteFileW(g_path); return TRUE; }
+    wchar_t *wbuf = (wchar_t *)malloc(((size_t)len + 1) * sizeof(wchar_t));
+    if (!wbuf) return FALSE;
+    GetWindowTextW(g_edit, wbuf, len + 1);
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, NULL, 0, NULL, NULL);
+    if (u8len <= 0) { free(wbuf); return FALSE; }
+    char *u8 = (char *)malloc((size_t)u8len + 1);
+    if (!u8) { free(wbuf); return FALSE; }
+    WideCharToMultiByte(CP_UTF8, 0, wbuf, len, u8, u8len, NULL, NULL);
+    free(wbuf);
+    wchar_t dp[MAX_PATH]; DraftPath(dp, MAX_PATH);
+    BOOL ok = WriteAllBytes(dp, u8, u8len);
+    free(u8);
+    if (ok) g_draftSaved = TRUE;
+    return ok;
+}
+
+/* if a draft exists with content, ask the user to restore it.
+ * returns TRUE when a draft was shown (dialog consumed the focus);
+ * returns FALSE when no draft or user chose to ignore. */
+static BOOL TryRestoreDraft(void)
+{
+    wchar_t dp[MAX_PATH]; DraftPath(dp, MAX_PATH);
+    if (GetFileAttributesW(dp) == INVALID_FILE_ATTRIBUTES) return FALSE;
+    HANDLE h = CreateFileW(dp, GENERIC_READ, FILE_SHARE_READ,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD sz = GetFileSize(h, NULL);
+    if (sz == 0xFFFFFFFF) { CloseHandle(h); return FALSE; }
+    char *raw = (char *)malloc(sz + 1);
+    if (!raw) { CloseHandle(h); return FALSE; }
+    DWORD nr = 0;
+    if (!ReadFile(h, raw, (DWORD)sz, &nr, NULL) || nr != sz) {
+        free(raw); CloseHandle(h); return FALSE;
+    }
+    CloseHandle(h);
+    raw[sz] = 0;
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, raw, (int)sz, NULL, 0);
+    if (wlen < 0) { free(raw); return FALSE; }
+    wchar_t *w = (wchar_t *)malloc(((size_t)wlen + 1) * sizeof(wchar_t));
+    if (!w) { free(raw); return FALSE; }
+    int conv = MultiByteToWideChar(CP_UTF8, 0, (const char *)raw, (int)sz, w, wlen);
+    free(raw);
+    if (conv != wlen) { free(w); return FALSE; }
+    if (wlen <= 0 || wlen > 1 << 20) { free(w); return FALSE; }
+    /* non-trivial: more than 8 chars */
+    int ui = MessageBoxW(g_hwnd,
+        L"发现未保存的草稿，是否恢复？", APP_NAME,
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+    if (ui != IDYES) { free(w); DeleteFileW(dp); return FALSE; }
+    if (!g_path[0]) { SetPath(NULL); g_dirty = FALSE; }
+    SetWindowTextW(g_edit, w);
+    g_dirty = FALSE;
+    DeleteFileW(dp);
+    UpdateTitle();
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    free(w);
+    return TRUE;
 }
 
 static BOOL LoadSettings(RECT *rc, BOOL *maxi)
