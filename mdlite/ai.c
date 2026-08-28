@@ -1315,6 +1315,9 @@ void AgFlushPending(void)
 /* ------------------------------------------------------------------ */
 /* editor subclass                                                      */
 /* ------------------------------------------------------------------ */
+#ifndef EM_GETSELTEXT
+#define EM_GETSELTEXT 0x00B2
+#endif
 
 /* indent / unindent every line of the current selection */
 static void EditIndentSel(HWND h, int add)

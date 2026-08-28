@@ -1,6 +1,9 @@
 /* MDLite - a tiny markdown editor & viewer
    build: x86_64-w64-mingw32-gcc -Os ... */
 #define _WIN32_WINNT 0x0601
+#ifndef EM_GETSELTEXT
+#define EM_GETSELTEXT 0x00B2
+#endif
 #include <windows.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -85,6 +88,11 @@ static WNDPROC g_findProc;
 static BOOL   g_findShown;
 static wchar_t g_findQuery[128] = L"";
 static wchar_t g_findInfo[64]   = L"";
+
+/* replace bar (shares the find row) */
+static HWND   g_replEdit;
+static WNDPROC g_replProc;
+static wchar_t g_replQuery[136] = L"";
 
 /* outline popup (Ctrl+P) */
 static HWND   g_olWnd;          /* popup container */
@@ -221,13 +229,13 @@ static void LayoutChildren(void)
     }
     ApplyEditPadding();
     if (g_findShown && g_findEdit) {
-        RECT rcClient;
-        GetClientRect(g_hwnd, &rcClient);
-        int x = SC(60);
-        int w = rcClient.right - SC(60) - SC(170);
-        if (w > SC(420)) w = SC(420);
-        if (w < SC(120)) w = SC(120);
-        MoveWindow(g_findEdit, x, HeaderH() + SC(7), w, SC(26), TRUE);
+        int fx = SC(48);
+        int fw = (rcBody.right - rcBody.left - SC(28)) * 38 / 100;
+        MoveWindow(g_findEdit, fx, HeaderH() + SC(7), fw, SC(26), TRUE);
+        if (g_replEdit) {
+            int rx = fx + fw + SC(42);
+            MoveWindow(g_replEdit, rx, HeaderH() + SC(7), fw, SC(26), TRUE);
+        }
     }
     if (g_preview) {
         /* re-layout preview for the new width */
@@ -444,7 +452,9 @@ static void ShowHelp(void)
         L"\r\n"
         L"视图：编辑 / 分屏 / 预览三态，Ctrl+/ 切换，或点右上分段。\r\n"
         L"文件：Ctrl+N 新建，Ctrl+O 打开，Ctrl+S 保存，Ctrl+Shift+S 另存；拖拽 .md 直接打开。\r\n"
-        L"查找：Ctrl+F，Enter/Shift+Enter 下一个/上一个，Esc 关闭。\r\n"
+        L"查找：Ctrl+F，替换：Ctrl+H。\r\n"
+        L"  Enter 查找下一个 · Shift+Enter 上一个\r\n"
+        L"  替换框 Enter 替换当前 · Ctrl+Enter 全部替换 · Esc 关闭。\r\n"
         L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
         L"AI：行首输入 /问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
         L"Agent：行首输入 //任务 后回车，调用 opencode 在文档目录执行，Esc 终止；超时秒数可在设置中调整。\r\n"
@@ -1875,7 +1885,77 @@ static void DoFind(int dir)
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
-static void ShowFindBar(void)
+/* replace the current match, then jump to the next one */
+static void DoReplaceOne(void)
+{
+    int ql = lstrlenW(g_findQuery);
+    if (ql == 0) { DoFind(1); return; }
+
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    wchar_t sel[144];
+    BOOL isMatch = FALSE;
+    if ((int)(e0 - s0) == ql && ql < 140) {
+        ((LPWORD)sel)[0] = (WORD)(ql + 1);
+        SendMessageW(g_edit, EM_GETSELTEXT, 0, (LPARAM)sel);
+        isMatch = match_at(sel, g_findQuery, ql);
+    }
+    if (!isMatch) { DoFind(1); return; }
+
+    wchar_t rep[136];
+    GetWindowTextW(g_replEdit, rep, 136);
+    SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)rep);
+    DoFind(1);
+}
+
+/* replace every occurrence (case-insensitive, non-overlapping) */
+static void DoReplaceAll(void)
+{
+    int ql = lstrlenW(g_findQuery);
+    if (ql == 0) { DoFind(1); return; }
+    wchar_t rep[136];
+    GetWindowTextW(g_replEdit, rep, 136);
+    int rl = lstrlenW(rep);
+
+    int len = GetWindowTextLengthW(g_edit);
+    wchar_t *buf = (wchar_t *)malloc(((size_t)len + 1) * sizeof(wchar_t));
+    if (!buf) return;
+    GetWindowTextW(g_edit, buf, len + 1);
+
+    int count = 0;
+    for (int i = 0; i + ql <= len; i++)
+        if (match_at(buf + i, g_findQuery, ql)) { count++; i += ql - 1; }
+    if (count == 0) {
+        lstrcpynW(g_findInfo, L"无匹配", 64);
+        free(buf);
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    long long nll = (long long)len + (long long)count * (rl - ql);
+    if (nll < 0) nll = 0;
+    wchar_t *out = (wchar_t *)malloc(((size_t)nll + 1) * sizeof(wchar_t));
+    if (!out) { free(buf); return; }
+    int o = 0;
+    for (int i = 0; i < len; ) {
+        if (i + ql <= len && match_at(buf + i, g_findQuery, ql)) {
+            memcpy(out + o, rep, (size_t)rl * sizeof(wchar_t));
+            o += rl; i += ql;
+        } else {
+            out[o++] = buf[i++];
+        }
+    }
+    out[o] = 0;
+    SendMessageW(g_edit, EM_SETSEL, 0, len);
+    SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)out);
+    SendMessageW(g_edit, EM_SETSEL, 0, 0);
+    wsprintfW(g_findInfo, L"已替换 %d 处", count);
+    free(buf);
+    free(out);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void ShowFindBar(int toReplace)
 {
     if (g_view == VIEW_PREVIEW) SetView(VIEW_SPLIT); /* keep editing */
     if (!g_findEdit) {
@@ -1885,13 +1965,20 @@ static void ShowFindBar(void)
         g_findProc = (WNDPROC)SetWindowLongPtrW(g_findEdit, GWLP_WNDPROC,
                                                 (LONG_PTR)FindProc);
         SendMessageW(g_findEdit, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+        g_replEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_replQuery,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 0, 0, g_hwnd, (HMENU)3, NULL, NULL);
+        g_replProc = (WNDPROC)SetWindowLongPtrW(g_replEdit, GWLP_WNDPROC,
+                                                (LONG_PTR)FindProc);
+        SendMessageW(g_replEdit, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
     }
     g_findShown = TRUE;
     ShowWindow(g_findEdit, SW_SHOW);
+    ShowWindow(g_replEdit, SW_SHOW);
     LayoutChildren();
     InvalidateRect(g_hwnd, NULL, TRUE);
-    SetFocus(g_findEdit);
-    SendMessageW(g_findEdit, EM_SETSEL, 0, -1);
+    SetFocus(toReplace ? g_replEdit : g_findEdit);
+    SendMessageW(toReplace ? g_replEdit : g_findEdit, EM_SETSEL, 0, -1);
 }
 
 void HideFindBar(void)
@@ -2116,6 +2203,13 @@ static LRESULT CALLBACK FindProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_KEYDOWN) {
         if (wp == VK_RETURN) {
+            if (h == g_replEdit) {
+                if (GetKeyState(VK_CONTROL) & 0x8000)
+                    DoReplaceAll();
+                else
+                    DoReplaceOne();
+                return 0;
+            }
             SendMessageW(g_hwnd, WM_EDITCMD,
                          (GetKeyState(VK_SHIFT) & 0x8000) ? IDM_FINDPREV
                                                           : IDM_FINDNEXT, 0);
@@ -2125,6 +2219,11 @@ static LRESULT CALLBACK FindProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             HideFindBar();
             return 0;
         }
+    }
+    if (msg == WM_CHAR && wp == 10) return 0; /* Ctrl+Enter linefeed */
+    if (msg == WM_CHAR || msg == WM_KEYUP) {
+        GetWindowTextW(g_findEdit, g_findQuery, 128);
+        GetWindowTextW(g_replEdit, g_replQuery, 136);
     }
     return CallWindowProcW(g_findProc, h, msg, wp, lp);
 }
@@ -2143,16 +2242,21 @@ static void DrawFindBar(HDC dc, RECT *rcClient)
     SelectObject(dc, op);
     DeleteObject(pen);
 
-    static const wchar_t *lbl = L"查找";
+    static const wchar_t *lblQ = L"查找";
+    static const wchar_t *lblR = L"替换";
     HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, COL_TITLE);
     TEXTMETRICW tm;
     GetTextMetricsW(dc, &tm);
-    TextOutW(dc, SC(14), rc.top + (SC(40) - tm.tmHeight) / 2,
-             lbl, lstrlenW(lbl));
+    int ty = rc.top + (SC(40) - tm.tmHeight) / 2;
+    TextOutW(dc, SC(14), ty, lblQ, lstrlenW(lblQ));
+    int qx = SC(14) + SC(34);
+    int qw = (rc.right - rc.left - SC(28)) * 38 / 100;
+    TextOutW(dc, qx + qw + SC(8), ty, lblR, lstrlenW(lblR));
 
-    const wchar_t *info = g_findInfo[0] ? g_findInfo : L"Enter 下一个 · Shift+Enter 上一个";
+    const wchar_t *info = g_findInfo[0] ? g_findInfo
+                        : L"Enter 查找 · 替换框 Enter 逐个 · Ctrl+Enter 全部";
     int w = text_w(dc, g_fontStatus, info, lstrlenW(info));
     SelectObject(dc, g_fontStatus);
     SetTextColor(dc, COL_STATTXT);
@@ -2379,7 +2483,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         case IDM_NEW:      DoNew();                 return 0;
         case IDM_TOGGLE:   SetView((g_view + 1) % 3); return 0;
-        case IDM_FIND:     ShowFindBar();           return 0;
+        case IDM_FIND:     ShowFindBar(FALSE);      return 0;
+        case IDM_REPLACE:  ShowFindBar(TRUE);       return 0;
         case IDM_FINDNEXT: DoFind(1);               return 0;
         case IDM_FINDPREV: DoFind(-1);              return 0;
         case IDM_ZOOM:     ApplyZoom(wp == (WPARAM)-1 ? -1 : 1); return 0;
@@ -2406,6 +2511,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == 'O') { SendMessageW(hwnd, WM_EDITCMD, IDM_OPEN, 0); return 0; }
             if (wp == 'N') { SendMessageW(hwnd, WM_EDITCMD, IDM_NEW, 0);  return 0; }
             if (wp == 'F') { SendMessageW(hwnd, WM_EDITCMD, IDM_FIND, 0); return 0; }
+            if (wp == 'H') { SendMessageW(hwnd, WM_EDITCMD, IDM_REPLACE, 0); return 0; }
             if (wp == VK_OEM_COMMA) { SendMessageW(hwnd, WM_EDITCMD, IDM_SETTINGS, 0); return 0; }
             if (wp == VK_OEM_2) { SendMessageW(hwnd, WM_EDITCMD, IDM_TOGGLE, 0); return 0; }
         }

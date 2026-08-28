@@ -25,6 +25,7 @@
 #define IDM_FIND     1006
 #define IDM_FINDNEXT 1007
 #define IDM_FINDPREV 1008
+#define IDM_REPLACE  1021
 #define IDM_ZOOM     1009
 #define IDM_SETTINGS 1010
 #define IDM_TRAY_SHOW  1011
