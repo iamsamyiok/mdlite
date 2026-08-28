@@ -52,13 +52,13 @@
     <h1>MDLite</h1>
     <p class="tag">极简 Markdown 编辑 / 查看器，单文件、零依赖</p>
     <div class="badges">
-      <span class="badge">体积 <b>132 KB</b></span>
+      <span class="badge">体积 <b>146 KB</b></span>
       <span class="badge">内存 <b>~3 MB</b></span>
       <span class="badge">单 exe · 无运行库</span>
       <span class="badge">Windows 10/11 · 64 位</span>
     </div>
     <a class="dl" id="dlbtn" href="#" onclick="return dl()">下载 MDLite.exe</a>
-    <p class="hint">132 KB · SHA-256 7ad6461e…11c284 · 下载后直接运行，无需安装</p>
+    <p class="hint">146 KB · SHA-256 61ca24a9…06ed1 · 下载后直接运行，无需安装</p>
   </div>
 
   <div class="shots">
@@ -88,6 +88,15 @@
       <li>自动历史存档，一键恢复</li>
       <li>内置极简 git 引擎，真 git 仓库</li>
       <li><kbd>Ctrl</kbd>+<kbd>F</kbd> 查找，计数跳转</li>
+      <li><kbd>Ctrl</kbd>+<kbd>H</kbd> 查找与替换（Enter 逐次替换，Ctrl+Enter 全部替换）</li>
+      <li><kbd>Ctrl</kbd>+<kbd>D</kbd> 复制当前行</li>
+      <li><kbd>Ctrl</kbd>+<kbd>L</kbd> 选中整行</li>
+      <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> 交换当前行与上下行</li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> 撤销 / 重做（RichEdit 原生多步）</li>
+      <li>列表回车自动续行（`- ` / `1. ` / `- [ ]`），空行退出列表</li>
+      <li>选区 <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 整体缩进/反缩进</li>
+      <li>Markdown 脚注：[^1] 定义 + 引用，渲染为带跳转编号</li>
+      <li>图片渲染：支持 PNG/JPG/BMP/GIF，WIC 解码，缩放显示</li>
       <li><kbd>Ctrl</kbd>+滚轮 五档缩放</li>
       <li>可配置全局热键（默认 Ctrl+Shift+Space）</li>
       <li>可配置自动保存间隔（0–86400 秒，默认 60）</li>
@@ -132,6 +141,7 @@
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd></td><td>另存为</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>/</kbd></td><td>循环切换 编辑 / 分栏 / 预览</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td><td>查找（Enter 下一个，Shift+Enter 上一个）</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>查找与替换（Enter 逐次，Ctrl+Enter 全部）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>P</kbd></td><td>文档大纲（输入过滤，Enter 跳转，Esc 关闭）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>,</kbd></td><td>设置（热键 / 自动保存间隔）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></td><td>全局热键：呼出 / 隐藏窗口</td></tr>
@@ -141,6 +151,10 @@
       <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></td><td>全局热键：呼出 / 隐藏窗口（默认，可改键）</td></tr>
       <tr><td><kbd>Ctrl</kbd> + 滚轮</td><td>缩放 85% – 150%，共五档</td></tr>
       <tr><td><kbd>Tab</kbd></td><td>插入 4 空格缩进</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>D</kbd></td><td>复制当前行</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>选中整行</td></tr>
+      <tr><td><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>↑</kbd>/<kbd>↓</kbd></td><td>交换当前行与上下行</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Y</kbd></td><td>撤销 / 重做（RichEdit 原生多步）</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>关闭查找 / 预览模式返回编辑</td></tr>
     </table>
   </div>
@@ -162,9 +176,9 @@
     <h2>为什么它这么小、这么省内存</h2>
     <p style="font-size:14.5px;color:#374151">
       MDLite 用纯 C 和 Win32 原生 API 编写，界面与 Markdown 渲染全部使用 GDI 直绘，
-      编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用自带 400 行 zlib 实现真压缩存储。
+      编辑器复用系统原生 RichEdit50W 控件（加载失败时自动回退 EDIT），SHA-1 用系统 CryptAPI，git 对象用自带 400 行 zlib 实现真压缩存储。
       <li>整个程序只链接 Windows 系统 DLL，没有浏览器内核、没有 Electron、没有 .NET 运行时，
-      因此体积只有 132 KB（含应用图标、git 引擎、AI 流式、Agent、打印与便携配置模块），空文档内存占用约 2–3 MB。</li>
+      因此体积只有 146 KB（含应用图标、git 引擎、AI 流式、Agent、打印与便携配置模块），空文档内存占用约 2–3 MB。</li>
     </p>
   </div>
 
