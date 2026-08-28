@@ -1,9 +1,14 @@
 /* MDLite - AI chat & agent background tasks */
 #define _WIN32_WINNT 0x0601
 #include "mdlite.h"
+#include "editlogic.h"
 #include <stdlib.h>
 #include <string.h>
 #include <winhttp.h>
+
+#ifndef EM_REDO
+#define EM_REDO 0x0454
+#endif
 
 /* AI provider config (OpenAI-compatible chat/completions) */
 wchar_t g_aiBase[256]  = L"";
@@ -1311,6 +1316,122 @@ void AgFlushPending(void)
 /* editor subclass                                                      */
 /* ------------------------------------------------------------------ */
 
+/* indent / unindent every line of the current selection */
+static void EditIndentSel(HWND h, int add)
+{
+    DWORD s0, e0;
+    SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    int l0 = (int)SendMessageW(h, EM_LINEFROMCHAR, s0, 0);
+    int l1 = (int)SendMessageW(h, EM_LINEFROMCHAR, e0, 0);
+    if (l1 > l0 && e0 == (DWORD)SendMessageW(h, EM_LINEINDEX, l1, 0))
+        l1--;                       /* caret on the following line start */
+    if (l1 - l0 + 1 > 2000) return;
+
+    wchar_t tmp[4096];
+    int cap = 1 << 16;
+    wchar_t *out = (wchar_t *)malloc(cap * sizeof(wchar_t));
+    if (!out) return;
+    int ol = 0;
+    for (int li = l0; li <= l1; li++) {
+        int ls = (int)SendMessageW(h, EM_LINEINDEX, li, 0);
+        int llen = (int)SendMessageW(h, EM_LINELENGTH, ls, 0);
+        int n = 0;
+        if (llen > 0 && llen < 4000)
+            n = EditGetLine(h, li, tmp, 4000);
+        if (add) {
+            if (ol + n + 6 > cap) break;
+            out[ol++] = L' '; out[ol++] = L' ';
+            out[ol++] = L' '; out[ol++] = L' ';
+        } else {
+            int cut = 0;
+            while (cut < n && cut < 4
+                   && (tmp[cut] == L' ' || tmp[cut] == L'\t')) cut++;
+            n -= cut;
+            memmove(tmp, tmp + cut, (size_t)n * sizeof(wchar_t));
+        }
+        if (ol + n + 4 > cap) break;
+        memcpy(out + ol, tmp, (size_t)n * sizeof(wchar_t));
+        ol += n;
+        if (li < l1) { out[ol++] = L'\r'; out[ol++] = L'\n'; }
+    }
+    out[ol] = 0;
+    int la = (int)SendMessageW(h, EM_LINEINDEX, l0, 0);
+    int lb = (int)SendMessageW(h, EM_LINEINDEX, l1, 0);
+    lb += (int)SendMessageW(h, EM_LINELENGTH, lb, 0);
+    SendMessageW(h, EM_SETSEL, la, lb);
+    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)out);
+    SendMessageW(h, EM_SETSEL, la, la + ol);
+    free(out);
+}
+
+/* duplicate the caret line right below it, keeping the column */
+static void EditDupLine(HWND h)
+{
+    DWORD s0, e0;
+    SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    int li = (int)SendMessageW(h, EM_LINEFROMCHAR, s0, 0);
+    int ls = (int)SendMessageW(h, EM_LINEINDEX, li, 0);
+    int llen = (int)SendMessageW(h, EM_LINELENGTH, ls, 0);
+    if (llen < 0 || llen > 16000) return;
+    wchar_t *A = (wchar_t *)malloc((llen + 2) * sizeof(wchar_t));
+    wchar_t *ins = (wchar_t *)malloc((llen + 4) * sizeof(wchar_t));
+    if (!A || !ins) { free(A); free(ins); return; }
+    EditGetLine(h, li, A, llen + 1);
+    ins[0] = L'\r'; ins[1] = L'\n';
+    memcpy(ins + 2, A, (size_t)llen * sizeof(wchar_t));
+    ins[llen + 2] = 0;
+    SendMessageW(h, EM_SETSEL, ls + llen, ls + llen);
+    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)ins);
+    int col = (int)s0 - ls;
+    if (col < 0) col = 0;
+    if (col > llen) col = llen;
+    SendMessageW(h, EM_SETSEL, ls + llen + 2 + col, ls + llen + 2 + col);
+    free(A);
+    free(ins);
+}
+
+/* swap the caret line with the one above/below */
+static void EditMoveLine(HWND h, int dir)
+{
+    DWORD s0;
+    SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)0);
+    int li = (int)SendMessageW(h, EM_LINEFROMCHAR, s0, 0);
+    int lj = li + dir;
+    if (lj < 0) return;
+    int total = (int)SendMessageW(h, EM_GETLINECOUNT, 0, 0);
+    if (lj >= total) return;
+
+    int p = li < lj ? li : lj;
+    int q = li < lj ? lj : li;
+    int ip = (int)SendMessageW(h, EM_LINEINDEX, p, 0);
+    int iq = (int)SendMessageW(h, EM_LINEINDEX, q, 0);
+    int lp = (int)SendMessageW(h, EM_LINELENGTH, ip, 0);
+    int lq = (int)SendMessageW(h, EM_LINELENGTH, iq, 0);
+    if (lp < 0 || lq < 0 || lp + lq > 60000) return;
+
+    wchar_t *A = (wchar_t *)malloc((lp + 2) * sizeof(wchar_t));
+    wchar_t *B = (wchar_t *)malloc((lq + 2) * sizeof(wchar_t));
+    wchar_t *ins = (wchar_t *)malloc((lp + lq + 8) * sizeof(wchar_t));
+    if (!A || !B || !ins) { free(A); free(B); free(ins); return; }
+    EditGetLine(h, p, A, lp + 1);
+    EditGetLine(h, q, B, lq + 1);
+
+    int ol = 0;
+    memcpy(ins, B, (size_t)lq * sizeof(wchar_t)); ol += lq;
+    ins[ol++] = L'\r'; ins[ol++] = L'\n';
+    memcpy(ins + ol, A, (size_t)lp * sizeof(wchar_t)); ol += lp;
+    ins[ol] = 0;
+    SendMessageW(h, EM_SETSEL, ip, iq + lq);
+    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)ins);
+    /* caret follows the moved line */
+    int nl = dir > 0 ? q : p;
+    int nls = (int)SendMessageW(h, EM_LINEINDEX, nl, 0);
+    SendMessageW(h, EM_SETSEL, nls, nls);
+    free(A);
+    free(B);
+    free(ins);
+}
+
 LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
@@ -1321,8 +1442,8 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
     if (msg == WM_KEYDOWN) {
         BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrl && wp == 'S') {
-            BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             SendMessageW(g_hwnd, WM_EDITCMD,
                          shift ? IDM_SAVEAS : IDM_SAVE, 0);
             return 0;
@@ -1359,6 +1480,41 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(h, EM_SETSEL, 0, -1);
             return 0;
         }
+        if (ctrl && wp == 'L') {            /* select current line */
+            DWORD s0 = 0, e0 = 0;
+            SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+            int li = (int)SendMessageW(h, EM_LINEFROMCHAR, s0, 0);
+            int ls = (int)SendMessageW(h, EM_LINEINDEX, li, 0);
+            int llen = (int)SendMessageW(h, EM_LINELENGTH, ls, 0);
+            SendMessageW(h, EM_SETSEL, ls, ls + llen);
+            return 0;
+        }
+        if (ctrl && (wp == 'D')) {          /* duplicate line */
+            EditDupLine(h);
+            return 0;
+        }
+        if (GetKeyState(VK_MENU) & 0x8000
+            && (wp == VK_UP || wp == VK_DOWN)) {   /* move line */
+            if (shift) {
+                EditMoveLine(h, wp == VK_UP ? -1 : 1);
+                return 0;
+            }
+        }
+        if ((ctrl && wp == 'Y')
+            || (ctrl && shift && wp == 'Z')) {  /* redo (richedit aware) */
+            SendMessageW(h, EM_REDO, 0, 0);
+            return 0;
+        }
+        if (wp == VK_TAB && !ctrl) {
+            DWORD s0 = 0, e0 = 0;
+            SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+            if (s0 != e0) {                 /* selection: indent block */
+                EditIndentSel(h, !shift);
+                return 0;
+            }
+            return 0;                       /* single tab handled in WM_CHAR */
+        }
+        if (wp == VK_TAB) return 0; /* handled in WM_CHAR */
         if (ctrl && wp == 'C') { SendMessageW(h, WM_COPY, 0, 0); return 0; }
         if (ctrl && wp == 'X') { SendMessageW(h, WM_CUT, 0, 0);  return 0; }
         if (ctrl && wp == 'V') { SendMessageW(h, WM_PASTE, 0, 0); return 0; }
@@ -1443,6 +1599,25 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
                 SendMessageW(h, EM_SETSEL, ls + 2, ls + 2);
                 return 0;
+            }
+            /* list item? continue the marker (or exit on empty item) */
+            {
+                wchar_t cont[112];
+                int exitList = 0;
+                int clen = ListContinuation(lbuf, got, cont, 112,
+                                            &exitList);
+                if (clen > 0) {
+                    if (exitList) {
+                        SendMessageW(h, EM_SETSEL, ls, ls + llen);
+                        SendMessageW(h, EM_REPLACESEL, TRUE,
+                                     (LPARAM)L"\r\n");
+                        SendMessageW(h, EM_SETSEL, ls + 2, ls + 2);
+                    } else {
+                        SendMessageW(h, EM_REPLACESEL, TRUE,
+                                     (LPARAM)cont);
+                    }
+                    return 0;
+                }
             }
             if (pre > 0 && pre < 64) {
                 wchar_t ins[80];

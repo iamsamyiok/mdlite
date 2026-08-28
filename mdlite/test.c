@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include "markdown.h"
+#include "editlogic.h"
 
 static int g_fail = 0;
 
@@ -328,6 +329,35 @@ int main(void)
     expect(bqOpen == 2 && bqClose == 2 && hInner,
            "html: nested blockquote nesting");
     free(html);
+
+    /* ---- editor logic: list continuation ---- */
+    {
+        wchar_t cont[112];
+        int ex = 0, cl;
+
+        cl = ListContinuation(L"- item", 6, cont, 112, &ex);
+        expect(cl == 4 && !ex && !wcscmp(cont, L"\r\n- "),
+               "listcont: dash item continues");
+        cl = ListContinuation(L"3. third", 8, cont, 112, &ex);
+        expect(cl == 5 && !ex && !wcscmp(cont, L"\r\n4. "),
+               "listcont: ordered marker increments");
+        cl = ListContinuation(L"- [ ] buy milk", 14, cont, 112, &ex);
+        expect(cl == 8 && !ex && !wcscmp(cont, L"\r\n- [ ] "),
+               "listcont: task item continues unchecked");
+        cl = ListContinuation(L"- ", 2, cont, 112, &ex);
+        expect(cl == 2 && ex, "listcont: empty item exits list");
+        cl = ListContinuation(L"  10. deep", 10, cont, 112, &ex);
+        expect(cl == 8 && !ex && !wcscmp(cont, L"\r\n  11. "),
+               "listcont: indent kept, big number ok");
+        cl = ListContinuation(L"plain text", 10, cont, 112, &ex);
+        expect(cl == 0, "listcont: non-list line ignored");
+        cl = ListContinuation(L"-nospace", 8, cont, 112, &ex);
+        expect(cl == 0, "listcont: dash without space ignored");
+        cl = ListContinuation(L"*x*", 3, cont, 112, &ex);
+        expect(cl == 0, "listcont: emphasis not a marker");
+        cl = ListContinuation(L"- done", 6, cont, 0, &ex);
+        expect(cl == 0, "listcont: tiny buffer safe");
+    }
 
     md_free_fonts(&f);
     ReleaseDC(0, dc);
