@@ -53,6 +53,7 @@ void md_init_fonts(MDFonts *f, HDC hdc, int dpi)
     f->ital     = make_font(dpi, L"Segoe UI", 105, 0, 1, 0);
     f->boldital = make_font(dpi, L"Segoe UI", 105, 1, 1, 0);
     f->mono     = make_font(dpi, L"Consolas", 95, 0, 0, 0);
+    f->sup      = make_font(dpi, L"Segoe UI", 75, 0, 0, 0);  /* 7.5pt */
     /* heading ladder: each level clearly larger than the next */
     f->h[0]     = make_font(dpi, L"Segoe UI", 260, 1, 0, 0); /* 26pt */
     f->h[1]     = make_font(dpi, L"Segoe UI", 200, 1, 0, 0); /* 20pt */
@@ -62,6 +63,7 @@ void md_init_fonts(MDFonts *f, HDC hdc, int dpi)
     f->h[5]     = make_font(dpi, L"Segoe UI", 108, 1, 0, 0); /* 10.8pt */
     f->bodyH = font_cellheight(hdc, f->body);
     f->monoH = font_cellheight(hdc, f->mono);
+    f->supH  = font_cellheight(hdc, f->sup);
     for (int i = 0; i < 6; i++)
         f->hH[i] = font_cellheight(hdc, f->h[i]);
 }
@@ -73,6 +75,7 @@ void md_free_fonts(MDFonts *f)
     if (f->ital)     DeleteObject(f->ital);
     if (f->boldital) DeleteObject(f->boldital);
     if (f->mono)     DeleteObject(f->mono);
+    if (f->sup)      DeleteObject(f->sup);
     for (int i = 0; i < 6; i++)
         if (f->h[i]) DeleteObject(f->h[i]);
     ZeroMemory(f, sizeof(*f));
@@ -161,6 +164,59 @@ static int match_link(const wchar_t *s, int len, int *contentStart,
     return j + 1;
 }
 
+/* CommonMark escapable punctuation after a backslash */
+static int is_escapable(wchar_t c)
+{
+    return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40)
+        || (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E);
+}
+
+/* `<https://...>` autolink: scheme + no spaces inside until '>' */
+static int match_autolink(const wchar_t *s, int len)
+{
+    if (s[0] != L'<') return 0;
+    static const wchar_t *schemes[] = { L"http://", L"https://",
+                                        L"ftp://", L"mailto:" };
+    int i = 1, sch = 0;
+    for (int k = 0; k < 4; k++) {
+        int sl = lstrlenW(schemes[k]);
+        if (len >= 1 + sl + 1 && !wcsncmp(s + 1, schemes[k], sl)) {
+            sch = sl;
+            break;
+        }
+    }
+    if (!sch) return 0;
+    i = 1 + sch;
+    while (i < len && s[i] != L'>') {
+        if (s[i] == L'<' || iswspace(s[i])) return 0;
+        i++;
+    }
+    if (i >= len || i == 1 + sch) return 0;   /* empty or no '>' */
+    return i + 1;
+}
+
+/* `[^label]: text` footnote definition line? */
+static int is_footnote_def(const wchar_t *s, int len,
+                           const wchar_t **label, int *labelLen,
+                           const wchar_t **text, int *textLen)
+{
+    if (len < 5 || s[0] != L'[' || s[1] != L'^') return 0;
+    int i = 2;
+    while (i < len && s[i] != L']') {
+        if (s[i] == L'[' || iswspace(s[i])) return 0;
+        i++;
+    }
+    if (i >= len || i - 2 < 1 || i - 2 > 16) return 0;
+    if (i + 1 >= len || s[i + 1] != L':') return 0;
+    *label = s + 2;
+    *labelLen = i - 2;
+    int t = i + 2;
+    if (t < len && s[t] == L' ') t++;
+    *text = s + t;
+    *textLen = len - t;
+    return 1;
+}
+
 static void parse_inline(const wchar_t *s, int len, int flags, int depth,
                          RunBuf *out, const wchar_t *url, int urlLen)
 {
@@ -169,7 +225,51 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
         wchar_t c = s[i];
         int matched = 0;
 
-        if (c == L'`') {
+        if (c == L'\\' && i + 1 < len && is_escapable(s[i + 1])) {
+            if (i > 0) push_run(out, s, i, flags, url, urlLen);
+            push_run(out, s + i + 1, 1, flags, NULL, 0);
+            i += 2; s += i; len -= i; i = 0;
+            matched = 1;
+        }
+        else if (c == L'<') {
+            int m = match_autolink(s + i, len - i);
+            if (m > 0) {
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                const wchar_t *u = s + i + 1;
+                int ul = m - 2;
+                push_run(out, u, ul, flags | RF_LINK, u, ul);
+                i += m; s += i; len -= i; i = 0;
+                matched = 1;
+            }
+        }
+        else if (depth < 3 && c == L'=' && i + 1 < len && s[i+1] == L'=') {
+            int m = match_marker(s + i, len - i, L"==");
+            if (m > 4) {
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                parse_inline(s + i + 2, m - 4, flags | RF_HL, depth + 1,
+                             out, url, urlLen);
+                i += m; s += i; len -= i; i = 0;
+                matched = 1;
+            }
+        }
+        else if (c == L'[' && i + 2 < len && s[i+1] == L'^') {
+            /* inline footnote reference [^label] */
+            int j = i + 2;
+            while (j < len && s[j] != L']') {
+                if (s[j] == L'[' || iswspace(s[j])) break;
+                j++;
+            }
+            if (j < len && s[j] == L']' && j - i - 2 >= 1
+                && j - i - 2 <= 16) {
+                if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                push_run(out, s + i + 1, j - i - 1, flags | RF_SUP,
+                         NULL, 0);
+                j++;
+                s += j; len -= j; i = 0;
+                matched = 1;
+            }
+        }
+        else if (c == L'`') {
             int j = i + 1;
             while (j < len && s[j] != L'`') j++;
             if (j < len && j > i + 1) {
@@ -475,6 +575,11 @@ static void wrap_line(MDLine *L, RunBuf *rb, const MDFonts *f, HDC hdc,
                 if (text_w(hdc, fo, t[i].ptr, mid) <= availW) lo = mid;
                 else hi = mid - 1;
             }
+            /* never split a UTF-16 surrogate pair across lines */
+            if (lo < t[i].len
+                && (t[i].ptr[lo - 1] & 0xFC00) == 0xD800
+                && (t[i].ptr[lo] & 0xFC00) == 0xDC00)
+                lo++;
             flush_sub(L, &cur, lineH);
             MDRun *one = (MDRun *)malloc(sizeof(MDRun) * 2);
             one[0].ptr = t[i].ptr; one[0].len = lo;      one[0].flags = t[i].flags;
@@ -798,10 +903,28 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
             }
         }
 
+        /* footnote definition line: stash, don't emit yet */
+        {
+            const wchar_t *fl = NULL, *ft = NULL;
+            int fll = 0, ftl = 0;
+            if (is_footnote_def(s, len, &fl, &fll, &ft, &ftl)
+                && doc->nfootnotes < 64) {
+                MDFootnote *fn = &doc->footnotes[doc->nfootnotes++];
+                fn->label = fl; fn->labelLen = fll;
+                fn->text = ft;  fn->textLen = ftl;
+                pos += advance;
+                if (pos >= total) break;
+                continue;
+            }
+        }
+
         if (s[0] == L'>') {
-            if (len > 1 && s[1] == L' ') { s += 2; len -= 2; }
-            else { s += 1; len -= 1; }
+            int qlevel = 0;
+            while (qlevel < 3 && qlevel < len && s[qlevel] == L'>') qlevel++;
+            s += qlevel; len -= qlevel;
+            if (len > 0 && s[0] == L' ') { s++; len--; }
             L = push_line(doc, LT_QUOTE);
+            L->depth = qlevel;
             goto have_line;
         }
 
@@ -853,6 +976,34 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
     }
 
     if (inCode) push_code_block(doc, codeId, codeStartY, y);
+
+    /* footnote section: separator + one indented line per definition */
+    if (doc->nfootnotes > 0) {
+        int lineH = f->bodyH + (f->bodyH >> 1);
+        MDLine *sep = push_line(doc, LT_HR);
+        sep->height = f->bodyH + 12;
+        sep->y = y;
+        y += sep->height;
+        for (int i = 0; i < doc->nfootnotes; i++) {
+            MDFootnote *fn = &doc->footnotes[i];
+            MDLine *FL = push_line(doc, LT_TEXT);
+            RunBuf rb = {0};
+            push_run(&rb, fn->label, fn->labelLen, RF_SUP, NULL, 0);
+            static const wchar_t dot[3] = L". ";
+            push_run(&rb, dot, 2, 0, NULL, 0);
+            if (fn->textLen > 0)
+                parse_inline(fn->text, fn->textLen, 0, 0, &rb, NULL, 0);
+            wrap_line(FL, &rb, f, hdc, contentW - 24, lineH, 0);
+            free_runs(&rb);
+            FL->padTop = 0;
+            FL->height = 0;
+            for (int k = 0; k < FL->nsubs; k++)
+                FL->height += FL->subs[k].height;
+            FL->y = y;
+            y += FL->height;
+        }
+    }
+
     doc->height = y;
 
     /* cache run pixel widths once so painting never re-measures */
@@ -863,7 +1014,9 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
         for (int k = 0; k < L->nsubs; k++)
             for (int ri = 0; ri < L->subs[k].nruns; ri++) {
                 MDRun *r = &L->subs[k].runs[ri];
-                r->w = text_w(hdc, font_for(f, r->flags, hl), r->ptr, r->len);
+                HFONT cf = (r->flags & RF_SUP) ? f->sup
+                           : font_for(f, r->flags, hl);
+                r->w = text_w(hdc, cf, r->ptr, r->len);
             }
         for (int c = 0; c < L->ncells; c++)
             for (int k = 0; k < L->cells[c].nsubs; k++)
@@ -916,12 +1069,14 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
     SetBkMode(hdc, TRANSPARENT);
     for (int i = 0; i < sub->nruns; i++) {
         const MDRun *r = &sub->runs[i];
-        HFONT fo = font_for(f, r->flags, hl);
+        int sup = (r->flags & RF_SUP) != 0;
+        HFONT fo = sup ? f->sup : font_for(f, r->flags, hl);
         HFONT old = (HFONT)SelectObject(hdc, fo);
-        int tmH = (r->flags & RF_CODE) ? f->monoH
+        int tmH = sup ? f->supH
+                  : (r->flags & RF_CODE) ? f->monoH
                   : hl ? f->hH[hl - 1] : f->bodyH;
         int w = r->w;
-        int ry = y + (sub->height - tmH) / 2;
+        int ry = y + (sub->height - tmH) / 2 - (sup ? tmH : 0);
 
         /* report clickable link rect to the host */
         if ((r->flags & RF_LINK) && g_linkSink && r->url && r->urlLen > 0
@@ -937,6 +1092,12 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
             HBRUSH br = CreateSolidBrush(g_colCodeInlineBg);
             FillRgn(hdc, rg, br);
             DeleteObject(rg);
+            DeleteObject(br);
+        }
+        if (r->flags & RF_HL) {
+            RECT rc = { x - 1, ry, x + w + 1, ry + tmH };
+            HBRUSH br = CreateSolidBrush(RGB(255, 244, 181));
+            FillRect(hdc, &rc, br);
             DeleteObject(br);
         }
 
@@ -1105,12 +1266,16 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
         case LT_QUOTE: {
             HPEN pen = CreatePen(PS_SOLID | PS_ENDCAP_ROUND, 3, g_colQuoteBar);
             HPEN op = (HPEN)SelectObject(hdc, pen);
-            MoveToEx(hdc, x + 1, top, NULL);
-            LineTo(hdc, x + 1, bottom);
+            for (int q = 0; q < L->depth; q++) {
+                MoveToEx(hdc, x + 1 + q * 14, top, NULL);
+                LineTo(hdc, x + 1 + q * 14, bottom);
+            }
             SelectObject(hdc, op);
             DeleteObject(pen);
+            int qi = L->depth * 14 + 4;
             for (int k = 0; k < L->nsubs; k++) {
-                draw_runs(hdc, &L->subs[k], x + 16, subY, f, g_colQuote, 0);
+                draw_runs(hdc, &L->subs[k], x + qi + 12, subY, f,
+                          g_colQuote, 0);
                 subY += L->subs[k].height;
             }
             break;
@@ -1282,6 +1447,34 @@ static void h_inline(HtmlOut *o, const wchar_t *s, int len, int depth)
 {
     for (int i = 0; i < len; i++) {
         wchar_t c = s[i];
+        if (c == L'\\' && i + 1 < len && is_escapable(s[i + 1])) {
+            h_appw(o, &s[i + 1], 1);   /* emit the escaped char verbatim */
+            i++;
+            continue;
+        }
+        if (c == L'<') {
+            int m = match_autolink(s + i, len - i);
+            if (m > 0) {
+                h_app(o, "<a href=\"");
+                h_appurl(o, s + i + 1, m - 2);
+                h_app(o, "\">");
+                h_appw(o, s + i + 1, m - 2);
+                h_app(o, "</a>");
+                i += m - 1;
+                continue;
+            }
+        }
+        if (depth < 4 && c == L'=' && i + 1 < len && s[i+1] == L'=') {
+            int m = i + 2;
+            while (m + 1 < len && !(s[m] == L'=' && s[m+1] == L'=')) m++;
+            if (m + 1 < len) {
+                h_app(o, "<mark>");
+                h_inline(o, s + i + 2, m - i - 2, depth + 1);
+                h_app(o, "</mark>");
+                i = m + 1;
+                continue;
+            }
+        }
         if (depth < 4 && c == L'*' && i + 1 < len && s[i+1] == L'*') {
             int m = i + 2;
             while (m + 1 < len && !(s[m] == L'*' && s[m+1] == L'*')) m++;
@@ -1344,6 +1537,21 @@ static void h_inline(HtmlOut *o, const wchar_t *s, int len, int depth)
                 }
             }
         }
+        if (c == L'[' && i + 2 < len && s[i+1] == L'^') {
+            int rb = i + 2;
+            while (rb < len && s[rb] != L']') {
+                if (s[rb] == L'[' || iswspace(s[rb])) break;
+                rb++;
+            }
+            if (rb < len && s[rb] == L']' && rb - i - 2 >= 1
+                && rb - i - 2 <= 16) {
+                h_app(o, "<sup>[");
+                h_appw(o, s + i + 2, rb - i - 2);
+                h_app(o, "]</sup>");
+                i = rb;
+                continue;
+            }
+        }
         if (c == L'[') {
             int rb = i + 1;
             while (rb < len && s[rb] != L']') rb++;
@@ -1363,6 +1571,12 @@ static void h_inline(HtmlOut *o, const wchar_t *s, int len, int depth)
         }
         h_appw(o, &c, 1);
     }
+}
+
+/* close any open blockquote levels */
+static void h_close_q(HtmlOut *o, int *qLv)
+{
+    while (*qLv > 0) { h_app(o, "</blockquote>\n"); (*qLv)--; }
 }
 
 /* delimiter row validity for html export (mirrors is_delim_row) */
@@ -1452,10 +1666,13 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
               "blockquote{border-left:4px solid #d2d2d7;margin:0;"
               "padding:2px 16px;color:#6e6e73}\n"
               "a{color:#007aff}\nimg{max-width:100%}\n"
+              "mark{background:#fff4b5;padding:0 2px}\n"
               "hr{border:none;border-top:1px solid #d2d2d7}\n"
               "</style>\n</head>\n<body>\n");
 
-    int inCode = 0, inP = 0, inUl = 0, inOl = 0, inQ = 0;
+    int inCode = 0, inP = 0, inUl = 0, inOl = 0, qLv = 0;
+    MDFootnote fns[64];
+    int nfn = 0;
     int pos = 0;
     while (pos <= srcLen) {
         const wchar_t *ls = src + pos;
@@ -1472,7 +1689,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-            if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+            h_close_q(&o, &qLv);
             pos += adv;
             if (pos > srcLen) break;
             continue;
@@ -1500,7 +1717,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-            if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+            h_close_q(&o, &qLv);
             h_app(&o, "<pre><code>");
             inCode = 1;
             pos += adv;
@@ -1535,7 +1752,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
                 if (inP) { h_app(&o, "</p>\n"); inP = 0; }
                 if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
                 if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-                if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+                h_close_q(&o, &qLv);
                 h_app(&o, "<table>\n<thead>\n<tr>\n");
                 tbl_emit_row(&o, s, sl, 1, ns2 + nlead2, nlen2 - nlead2);
                 h_app(&o, "</tr>\n</thead>\n<tbody>\n");
@@ -1571,7 +1788,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
                 if (inP) { h_app(&o, "</p>\n"); inP = 0; }
                 if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
                 if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-                if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+                h_close_q(&o, &qLv);
                 const char *tags[6] = { "h1", "h2", "h3", "h4", "h5", "h6" };
                 h_app(&o, "<");
                 h_app(&o, tags[lv-1]);
@@ -1586,14 +1803,32 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             }
         }
 
+        /* footnote definition line: collect, emit at the end */
+        {
+            const wchar_t *fl = NULL, *ft = NULL;
+            int fll = 0, ftl = 0;
+            if (is_footnote_def(s, sl, &fl, &fll, &ft, &ftl)
+                && nfn < 64) {
+                fns[nfn].label = fl; fns[nfn].labelLen = fll;
+                fns[nfn].text = ft;  fns[nfn].textLen = ftl;
+                nfn++;
+                pos += adv;
+                if (pos > srcLen) break;
+                continue;
+            }
+        }
+
         if (s[0] == L'>') {
-            const wchar_t *qs = s + 1;
-            int ql = sl - 1;
+            int qlevel = 0;
+            while (qlevel < 3 && qlevel < sl && s[qlevel] == L'>') qlevel++;
+            const wchar_t *qs = s + qlevel;
+            int ql = sl - qlevel;
             if (ql > 0 && qs[0] == L' ') { qs++; ql--; }
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-            if (!inQ) { h_app(&o, "<blockquote>\n"); inQ = 1; }
+            while (qLv < qlevel) { h_app(&o, "<blockquote>\n"); qLv++; }
+            while (qLv > qlevel) { h_app(&o, "</blockquote>\n"); qLv--; }
             h_app(&o, "<p>");
             h_inline(&o, qs, ql, 0);
             h_app(&o, "</p>\n");
@@ -1617,7 +1852,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             }
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-            if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+            h_close_q(&o, &qLv);
             if (!inUl) {
                 h_app(&o, task ? "<ul class=\"task\">\n" : "<ul>\n");
                 inUl = 1;
@@ -1640,7 +1875,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (d < sl && s[d] == L'.' && d + 1 < sl && s[d+1] == L' ') {
                 if (inP) { h_app(&o, "</p>\n"); inP = 0; }
                 if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
-                if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+                h_close_q(&o, &qLv);
                 if (!inOl) { h_app(&o, "<ol>\n"); inOl = 1; }
                 h_app(&o, "<li>");
                 h_inline(&o, s + d + 2, sl - d - 2, 0);
@@ -1654,7 +1889,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
         /* paragraph line: merge consecutive lines with <br> */
         if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
         if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
-        if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+        h_close_q(&o, &qLv);
         if (!inP) { h_app(&o, "<p>"); inP = 1; }
         else h_app(&o, "<br>\n");
         h_inline(&o, s, sl, 0);
@@ -1665,7 +1900,18 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
     if (inP) h_app(&o, "</p>\n");
     if (inUl) h_app(&o, "</ul>\n");
     if (inOl) h_app(&o, "</ol>\n");
-    if (inQ) h_app(&o, "</blockquote>\n");
+    h_close_q(&o, &qLv);
+    if (nfn > 0) {
+        h_app(&o, "<hr>\n<section class=\"footnotes\">\n<ol>\n");
+        for (int i = 0; i < nfn; i++) {
+            h_app(&o, "<li id=\"fn-");
+            h_appurl(&o, fns[i].label, fns[i].labelLen);
+            h_app(&o, "\">");
+            h_inline(&o, fns[i].text, fns[i].textLen, 0);
+            h_app(&o, "</li>\n");
+        }
+        h_app(&o, "</ol>\n</section>\n");
+    }
     h_app(&o, "</body>\n</html>\n");
 
     if (!o.buf) return 0;

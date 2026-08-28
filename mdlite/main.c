@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wctype.h>
+#include <wchar.h>
 
 /* theme - Apple-style (macOS system colors) */
 static const COLORREF COL_ACCENT   = RGB(0x00,0x7A,0xFF); /* systemBlue */
@@ -61,6 +62,9 @@ char  g_archivedTree[41]; /* tree already recorded (skip re-archiving) */
 
 static BOOL    g_topmost;             /* keep window on top */
 BOOL   g_indentRet    = TRUE; /* Enter inherits leading blanks */
+/* eol/BOM fidelity: preserve the file's original flavor on save */
+static BOOL g_eolLF   = TRUE; /* TRUE: write LF, FALSE: write CRLF */
+static BOOL g_bomUtf8 = FALSE;
 
 /* most-recently-used file list */
 #define MRU_MAX 10
@@ -335,15 +339,18 @@ static BOOL LoadFile(const wchar_t *path)
     if (!ok) { free(u8); return FALSE; }
 
     int off = 0;
+    g_bomUtf8 = FALSE;
     if (rd >= 3 && (BYTE)u8[0] == 0xEF && (BYTE)u8[1] == 0xBB
         && (BYTE)u8[2] == 0xBF) {
         off = 3; rd -= 3;
+        g_bomUtf8 = TRUE;
     }
     int wlen = MultiByteToWideChar(CP_UTF8, 0, u8 + off, rd, NULL, 0);
     wchar_t *wbuf = (wchar_t *)malloc((wlen + 1) * sizeof(wchar_t));
     if (!wbuf) { free(u8); return FALSE; }
     MultiByteToWideChar(CP_UTF8, 0, u8 + off, rd, wbuf, wlen);
     wbuf[wlen] = 0;
+    g_eolLF = (wmemchr(wbuf, L'\r', wlen) == NULL);
     free(u8);
 
     SetWindowTextW(g_edit, wbuf);
@@ -370,10 +377,25 @@ static BOOL SaveFileEx(const wchar_t *path, BOOL isAuto)
     GetWindowTextW(g_edit, wbuf, len + 1);
 
     int u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, NULL, 0, NULL, NULL);
-    char *u8 = (char *)malloc(u8len + 1);
+    char *u8 = (char *)malloc(u8len + 4);
     if (!u8) { free(wbuf); return FALSE; }
     WideCharToMultiByte(CP_UTF8, 0, wbuf, len, u8, u8len, NULL, NULL);
     free(wbuf);
+
+    /* restore the file's original eol flavor (EDIT always yields CRLF) */
+    if (g_eolLF) {
+        int w = 0;
+        for (int r = 0; r < u8len; r++) {
+            if (u8[r] == '\r' && r + 1 < u8len && u8[r + 1] == '\n') continue;
+            u8[w++] = u8[r];
+        }
+        u8len = w;
+    }
+    if (g_bomUtf8) {
+        memmove(u8 + 3, u8, u8len);
+        u8[0] = (char)0xEF; u8[1] = (char)0xBB; u8[2] = (char)0xBF;
+        u8len += 3;
+    }
 
     if (!WriteAllBytes(path, u8, u8len)) { free(u8); return FALSE; }
 
@@ -555,6 +577,8 @@ static void DoNew(void)
     SetWindowTextW(g_edit, L"");
     SetPath(NULL);
     g_dirty = FALSE;
+    g_eolLF = TRUE;
+    g_bomUtf8 = FALSE;
     UpdateTitle();
 }
 
@@ -1615,6 +1639,13 @@ static int CountWords(const wchar_t *s, int len)
     int words = 0, inWord = 0;
     for (int i = 0; i < len; i++) {
         wchar_t c = s[i];
+        /* merge UTF-16 surrogate pairs into a single character */
+        if ((c & 0xFC00) == 0xD800 && i + 1 < len
+            && (s[i + 1] & 0xFC00) == 0xDC00) {
+            i++;
+            if (!inWord) { words++; inWord = 1; }
+            continue;
+        }
         BOOL cjk = (c >= 0x2E80 && c <= 0x9FFF)
                    || (c >= 0xF900 && c <= 0xFAFF)
                    || (c >= 0xFF00 && c <= 0xFFEF)

@@ -221,9 +221,81 @@ int main(void)
     expect(doc.ncodeBlocks == 1, "unterminated fence also cached");
     md_free(&doc);
 
-    /* ---- html export: tables + tasks ---- */
+    /* ---- escapes / autolinks / highlights / nested quotes / emoji ---- */
     char *html = NULL;
-    int hl = md_to_html(tbl, lstrlenW(tbl), &html);
+    int hl = 0;
+    const wchar_t *syn =
+        L"\\*not italic\\* plain\n"
+        L"<https://example.com/a?b=c> end\n"
+        L"==highlighted== text\n"
+        L"> outer\n"
+        L">> inner\n"
+        L"> back to one\n"
+        L"a 😀 b\n";
+    md_build(&doc, syn, lstrlenW(syn), &f, dc, 700);
+    int escOk = 1, linkOk = 0, hlOk = 0;
+    for (int i = 0; i < doc.nlines; i++) {
+        MDLine *L2 = &doc.lines[i];
+        for (int k = 0; k < L2->nsubs && L2->type == LT_TEXT; k++)
+            for (int r2 = 0; r2 < L2->subs[k].nruns; r2++) {
+                MDRun *R = &L2->subs[k].runs[r2];
+                if (R->flags & RF_ITALIC) escOk = 0;
+                if ((R->flags & RF_LINK) && R->url
+                    && !wcsncmp(R->url, L"https://", 8)) linkOk = 1;
+                if (R->flags & RF_HL) hlOk = 1;
+            }
+    }
+    expect(escOk, "escape: backslash prevents emphasis");
+    expect(linkOk, "autolink <https://...> becomes link run");
+    expect(hlOk, "==mark== becomes highlight run");
+    int qDepthOk = doc.nlines >= 7
+        && doc.lines[3].type == LT_QUOTE && doc.lines[3].depth == 1
+        && doc.lines[4].type == LT_QUOTE && doc.lines[4].depth == 2
+        && doc.lines[5].type == LT_QUOTE && doc.lines[5].depth == 1;
+    expect(qDepthOk, "nested quote levels parsed");
+    /* emoji kept as one run (surrogate pair not split) */
+    int emojiOk = 0;
+    for (int k = 0; k < doc.lines[6].nsubs; k++)
+        for (int r2 = 0; r2 < doc.lines[6].subs[k].nruns; r2++)
+            if (doc.lines[6].subs[k].runs[r2].flags == 0
+                && doc.lines[6].subs[k].runs[r2].len > 0) emojiOk = 1;
+    expect(emojiOk, "emoji line builds runs");
+    md_free(&doc);
+
+    /* ---- footnotes ---- */
+    const wchar_t *fnmd =
+        L"Text with a note[^1] and [^long-label].\n"
+        L"\n"
+        L"[^1]: first footnote\n"
+        L"[^long-label]: second **bold** note\n";
+    md_build(&doc, fnmd, lstrlenW(fnmd), &f, dc, 700);
+    expect(doc.nfootnotes == 2, "footnote: 2 definitions collected");
+    int fnSup = 0;
+    for (int k = 0; k < doc.lines[0].nsubs; k++)
+        for (int r2 = 0; r2 < doc.lines[0].subs[k].nruns; r2++)
+            if (doc.lines[0].subs[k].runs[r2].flags & RF_SUP) fnSup++;
+    expect(fnSup == 2, "footnote: inline refs rendered as superscript");
+    int fnTail = 0;
+    for (int i = 0; i < doc.nlines; i++)
+        if (doc.lines[i].type == LT_HR) fnTail = 1;
+    expect(fnTail && doc.nlines > 3, "footnote: separator + notes appended");
+    md_free(&doc);
+
+    html = NULL;
+    hl = md_to_html(fnmd, lstrlenW(fnmd), &html);
+    int hFnOl = 0, hFnLi = 0, hFnSup = 0;
+    if (html) {
+        for (int i = 0; i + 8 < hl; i++) {
+            if (!strncmp(html + i, "<section class=\"footnotes\"", 26)) hFnOl = 1;
+            if (!strncmp(html + i, "id=\"fn-1\"", 9)) hFnLi = 1;
+            if (!strncmp(html + i, "<sup>[1]</sup>", 14)) hFnSup = 1;
+        }
+    }
+    expect(hFnOl && hFnLi && hFnSup, "html: footnotes section emitted");
+    free(html);
+
+    /* ---- html export: tables + tasks ---- */
+    hl = md_to_html(tbl, lstrlenW(tbl), &html);
     expect(hl > 0 && html != NULL, "html: generated");
     int hasTable = 0, hasTh = 0, hasCenter = 0, hasRight = 0, hasTd = 0;
     if (html) {
@@ -240,16 +312,21 @@ int main(void)
     free(html);
 
     html = NULL;
-    hl = md_to_html(taskmd, lstrlenW(taskmd), &html);
-    int hasBox = 0, hasChecked = 0, hasTaskUl = 0;
+    hl = md_to_html(syn, lstrlenW(syn), &html);
+    int hEsc = 0, hLink = 0, hMark = 0, bqOpen = 0, bqClose = 0, hInner = 0;
     if (html) {
         for (int i = 0; i + 8 < hl; i++) {
-            if (!strncmp(html + i, "type=\"checkbox\"", 15)) hasBox = 1;
-            if (!strncmp(html + i, "disabled checked", 16)) hasChecked = 1;
-            if (!strncmp(html + i, "<ul class=\"task\"", 16)) hasTaskUl = 1;
+            if (!strncmp(html + i, "<em>", 4)) hEsc = 1;
+            if (!strncmp(html + i, "href=\"https://example.com", 25)) hLink = 1;
+            if (!strncmp(html + i, "<mark>", 6)) hMark = 1;
+            if (!strncmp(html + i, "<blockquote>", 12)) bqOpen++;
+            if (!strncmp(html + i, "</blockquote>", 13)) bqClose++;
+            if (!strncmp(html + i, "<p>inner</p>", 12)) hInner = 1;
         }
     }
-    expect(hasBox && hasChecked && hasTaskUl, "html: task checkboxes");
+    expect(!hEsc && hLink && hMark, "html: escape/autolink/mark emitted");
+    expect(bqOpen == 2 && bqClose == 2 && hInner,
+           "html: nested blockquote nesting");
     free(html);
 
     md_free_fonts(&f);

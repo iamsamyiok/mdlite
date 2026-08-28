@@ -11,7 +11,9 @@ enum {
     RF_CODE   = 4,   /* inline code, monospace */
     RF_STRIKE = 8,
     RF_LINK   = 16,  /* link text, colored + underlined */
-    RF_IMAGE  = 32   /* image alt text, italic gray */
+    RF_IMAGE  = 32,  /* image alt text, italic gray */
+    RF_HL     = 64,  /* ==highlight== */
+    RF_SUP    = 128  /* superscript (footnote refs) */
 };
 
 /* block line types */
@@ -77,14 +79,23 @@ typedef struct MDLine {
 typedef struct MDFonts {
     HFONT body, bold, ital, boldital;
     HFONT mono;
+    HFONT sup;               /* small superscript font (footnotes) */
     HFONT h[6];
-    int bodyH, monoH, hH[6];  /* character cell heights */
+    int bodyH, monoH, supH, hH[6];  /* character cell heights */
 } MDFonts;
 
 /* code block extent, cached at build for fast background painting */
 typedef struct MDCodeBlock {
     int id, top, bottom;
 } MDCodeBlock;
+
+/* footnote definition collected at build time */
+typedef struct MDFootnote {
+    const wchar_t *label;  /* points into MDDoc.text */
+    int labelLen;
+    const wchar_t *text;
+    int textLen;
+} MDFootnote;
 
 typedef struct MDDoc {
     wchar_t *text;          /* owned buffer, runs point into it */
@@ -94,6 +105,8 @@ typedef struct MDDoc {
     int width;              /* width the doc was laid out for */
     MDCodeBlock *codeBlocks;
     int ncodeBlocks, capCodeBlocks;
+    MDFootnote footnotes[64]; /* collected [^x]: definitions */
+    int nfootnotes;
 } MDDoc;
 
 void md_init_fonts(MDFonts *f, HDC hdc, int dpi);
