@@ -86,10 +86,44 @@ int main(void)
         }
     expect(y1 - y0 >= 20, "heading glyph height >= 20px (big font used)");
     printf("  heading glyph y0=%d y1=%d span=%d\n", y0, y1, y1 - y0);
+    DeleteDC(mem);
+    DeleteObject(dib);
+    md_free(&doc);
+
+    /* ---- table + task list rendering ---- */
+    const wchar_t *md2 =
+        L"| H1 | H2 |\n|---|---|\n| a | b |\n\n"
+        L"- [ ] open\n"
+        L"- [x] done\n";
+    ZeroMemory(&doc, sizeof(doc));
+    md_build(&doc, md2, lstrlenW(md2), &f, sdc, W);
+    int trows = 0;
+    for (int i = 0; i < doc.nlines; i++)
+        if (doc.lines[i].type == LT_TABLEROW) trows++;
+    expect(trows == 2, "render doc: 2 table rows built");
+    int tasks = 0;
+    for (int i = 0; i < doc.nlines; i++)
+        if (doc.lines[i].task) tasks++;
+    expect(tasks == 2, "render doc: 2 task items built");
+
+    bits = NULL;
+    dib = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+    mem = CreateCompatibleDC(0);
+    SelectObject(mem, dib);
+    md_paint(&doc, mem, &rc, 0, &f);
+
+    /* header row fill must appear (gray band wider than glyph noise) */
+    int hdrFill = count_color(bits, 40, 0, W - 40, doc.height,
+                              RGB(0xF5, 0xF5, 0xF7));
+    expect(hdrFill > 200, "table header fill painted");
+    /* accent-colored checkbox strokes must appear (g_colLink blue) */
+    int acc = count_color(bits, 24, 0, W - 24, doc.height, RGB(0x00,0x7A,0xFF));
+    expect(acc > 10, "task checkbox accent painted");
 
     DeleteDC(mem);
     DeleteObject(dib);
     md_free(&doc);
+
     md_free_fonts(&f);
     ReleaseDC(0, sdc);
     printf(g_fail ? "\nRESULT: FAIL\n" : "\nRESULT: ALL PASS\n");

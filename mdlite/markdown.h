@@ -24,7 +24,8 @@ enum {
     LT_QUOTE,
     LT_ITEM,          /* unordered list item */
     LT_OLITEM,        /* ordered list item */
-    LT_HR
+    LT_HR,
+    LT_TABLEROW       /* table row (first one is the header) */
 };
 
 typedef struct MDRun {
@@ -33,6 +34,7 @@ typedef struct MDRun {
     int flags;
     const wchar_t *url;  /* link target (points into text), NULL if none */
     int urlLen;
+    int w;               /* cached pixel width (set at build time) */
 } MDRun;
 
 /* one visual sub-line produced by word wrapping */
@@ -41,6 +43,16 @@ typedef struct MDSub {
     int nruns;
     int height;      /* pixel height of this sub-line */
 } MDSub;
+
+/* table cell: source range + wrapped sub-lines */
+typedef struct MDCell {
+    const wchar_t *ptr;
+    int len;
+    MDSub *subs;
+    int nsubs;
+} MDCell;
+
+#define MD_MAX_COLS 16
 
 typedef struct MDLine {
     int type;
@@ -52,6 +64,13 @@ typedef struct MDLine {
     int nsubs;
     int y;           /* absolute top offset in document */
     int height;      /* total pixel height (subs + spacing) */
+    char task;       /* 0 none, 1 unchecked box, 2 checked box */
+    /* table row payload (LT_TABLEROW) */
+    MDCell *cells;
+    int ncells;
+    int isHeader;
+    char aligns[MD_MAX_COLS]; /* 0 left, 1 center, 2 right */
+    int colW[MD_MAX_COLS];    /* resolved column widths in px */
 } MDLine;
 
 /* font set, rebuilt on dpi change */
@@ -62,12 +81,19 @@ typedef struct MDFonts {
     int bodyH, monoH, hH[6];  /* character cell heights */
 } MDFonts;
 
+/* code block extent, cached at build for fast background painting */
+typedef struct MDCodeBlock {
+    int id, top, bottom;
+} MDCodeBlock;
+
 typedef struct MDDoc {
     wchar_t *text;          /* owned buffer, runs point into it */
     MDLine *lines;
     int nlines, caplines;
     int height;             /* total document height in px */
     int width;              /* width the doc was laid out for */
+    MDCodeBlock *codeBlocks;
+    int ncodeBlocks, capCodeBlocks;
 } MDDoc;
 
 void md_init_fonts(MDFonts *f, HDC hdc, int dpi);

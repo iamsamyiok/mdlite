@@ -52,13 +52,13 @@
     <h1>MDLite</h1>
     <p class="tag">极简 Markdown 编辑 / 查看器，单文件、零依赖</p>
     <div class="badges">
-      <span class="badge">体积 <b>118 KB</b></span>
+      <span class="badge">体积 <b>132 KB</b></span>
       <span class="badge">内存 <b>~3 MB</b></span>
       <span class="badge">单 exe · 无运行库</span>
       <span class="badge">Windows 10/11 · 64 位</span>
     </div>
     <a class="dl" id="dlbtn" href="#" onclick="return dl()">下载 MDLite.exe</a>
-    <p class="hint">118 KB · 下载后直接运行，无需安装</p>
+    <p class="hint">132 KB · SHA-256 7ad6461e…11c284 · 下载后直接运行，无需安装</p>
   </div>
 
   <div class="shots">
@@ -81,6 +81,10 @@
       <li>UTF-8 读写（兼容 BOM）</li>
       <li>拖拽 .md 文件到窗口打开</li>
       <li>命令行传参：MDLite.exe note.md</li>
+      <li>GFM 表格：列对齐（左 / 中 / 右）、自动列宽、超宽按比例收缩</li>
+      <li>任务列表：- [ ] / - [x] 渲染为复选框，完成项划线灰显</li>
+      <li>外部修改检测：文件被其他程序改动后自动重载或状态栏提示</li>
+      <li>渲染性能优化：run 宽度缓存 + 二分定位，滚动零文本测量</li>
       <li>自动历史存档，一键恢复</li>
       <li>内置极简 git 引擎，真 git 仓库</li>
       <li><kbd>Ctrl</kbd>+<kbd>F</kbd> 查找，计数跳转</li>
@@ -144,12 +148,13 @@
   <div class="card">
     <h2>历史版本 = 内置 git 时间机</h2>
     <p style="font-size:14.5px;color:#374151">
-      文件夹里只保留一份工作文件。每次保存自动在
-      <code style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:0 5px">.mdlite-git</code>
-      写入一个真正的 git 提交：相同内容自动去重、内容增量存储、完整时间线。
-      点击工具栏「历史」即可浏览各保存点并一键恢复，主文件路径保持不变。
-      仓库是标准 git 格式——用 <code style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:0 5px">git --git-dir=.mdlite-git log</code>
-      随时查看完整历史。自动保存触发时同样入库存档。
+      文件夹里只保留一份工作文件。每次保存自动在 exe 旁的
+      <code style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:0 5px">.mdlite\history\&lt;文档指纹&gt;</code>
+      仓库写入一个真正的 git 提交：对象 zlib 压缩存储、相同内容自动去重、完整时间线。
+      点击工具栏「历史」即可浏览各保存点并一键恢复，主文件路径保持不变；
+      历史条数超限自动物理截断，钉住的版本永不删除。
+      仓库是标准 git 格式，旧版 <code style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:0 5px">.mdlite-git</code>
+      文档内仓库首次保存时自动迁移（跨盘也能搬）。自动保存触发时同样入库存档。
     </p>
   </div>
 
@@ -157,9 +162,9 @@
     <h2>为什么它这么小、这么省内存</h2>
     <p style="font-size:14.5px;color:#374151">
       MDLite 用纯 C 和 Win32 原生 API 编写，界面与 Markdown 渲染全部使用 GDI 直绘，
-      编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用零依赖 zlib stored 编码。
+      编辑器复用系统原生 EDIT 控件，SHA-1 用系统 CryptAPI，git 对象用自带 400 行 zlib 实现真压缩存储。
       <li>整个程序只链接 Windows 系统 DLL，没有浏览器内核、没有 Electron、没有 .NET 运行时，
-      因此体积只有 118 KB（含应用图标、git 引擎、AI 流式、Agent、打印与便携配置模块），空文档内存占用约 2–3 MB。</li>
+      因此体积只有 132 KB（含应用图标、git 引擎、AI 流式、Agent、打印与便携配置模块），空文档内存占用约 2–3 MB。</li>
     </p>
   </div>
 

@@ -2,6 +2,9 @@
 #include "markdown.h"
 #include <stdlib.h>
 #include <string.h>
+#include <wctype.h>
+#include <wchar.h>
+
 
 /* Apple-style palette (macOS system colors) */
 COLORREF g_colText        = RGB(0x1D,0x1D,0x1F); /* label */
@@ -285,6 +288,76 @@ static wchar_t *expand_tabs(wchar_t *buf, int *plen)
 }
 
 /* ------------------------------------------------------------------ */
+/* tables                                                              */
+/* ------------------------------------------------------------------ */
+
+#define TB_PADX 8
+#define TB_PADY 5
+
+/* delimiter row: only | - : and spaces, at least one dash */
+static int is_delim_row(const wchar_t *s, int len)
+{
+    int dashes = 0, bars = 0;
+    for (int i = 0; i < len; i++) {
+        wchar_t c = s[i];
+        if (c == L'-') dashes++;
+        else if (c == L'|') bars++;
+        else if (c == L':' || c == L' ') continue;
+        else return 0;
+    }
+    return dashes >= 1 && bars >= 1;
+}
+
+/* parse alignment out of a delimiter row cell text */
+static char parse_align(const wchar_t *s, int len)
+{
+    int first = -1, last = -1;
+    for (int i = 0; i < len; i++)
+        if (s[i] == L':') { if (first < 0) first = i; last = i; }
+    if (first == 0 && last == len - 1 && len > 0) return 1; /* :---: */
+    if (last == len - 1 && len > 0) return 2;               /* ---:   */
+    return 0;                                               /* :--- --- */
+}
+
+/* split "|a|b|c" into cell ranges (ptr/len, trimmed); returns count.
+ * cells points at a caller-provided MD_MAX_COLS array. */
+static int split_cells(const wchar_t *s, int len, MDCell *cells)
+{
+    int n = 0;
+    int i = 0;
+    if (i < len && s[i] == L'|') i++;       /* leading bar */
+    while (i < len && n < MD_MAX_COLS) {
+        int j = i;
+        while (j < len && s[j] != L'|') j++;
+        int a = i, b = j;
+        while (a < b && iswspace(s[a])) a++;
+        while (b > a && iswspace(s[b - 1])) b--;
+        cells[n].ptr = s + a;
+        cells[n].len = b - a;
+        cells[n].subs = NULL;
+        cells[n].nsubs = 0;
+        n++;
+        i = j + 1;
+    }
+    return n;
+}
+
+/* cache code block extents for fast background painting */
+static void push_code_block(MDDoc *d, int id, int top, int bottom)
+{
+    if (d->ncodeBlocks == d->capCodeBlocks) {
+        d->capCodeBlocks = round_up(d->capCodeBlocks);
+        d->codeBlocks = (MDCodeBlock *)realloc(d->codeBlocks,
+                           d->capCodeBlocks * sizeof(MDCodeBlock));
+    }
+    d->codeBlocks[d->ncodeBlocks].id = id;
+    d->codeBlocks[d->ncodeBlocks].top = top;
+    d->codeBlocks[d->ncodeBlocks].bottom = bottom;
+    d->ncodeBlocks++;
+}
+
+
+/* ------------------------------------------------------------------ */
 /* layout (word wrap)                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -443,14 +516,22 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
     int contentW = width - 48; /* 24px margins each side */
     if (contentW < 100) contentW = 100;
 
-    int inCode = 0, codeId = 0;
+    int inCode = 0, codeId = 0, codeStartY = 0;
     int y = 0, pos = 0;
     int pendingBlank = 0;
     int headingLevel = 0;
     int total = srcLen;
     const wchar_t *p = doc->text;
 
-    while (pos <= total) {
+    if (total == 0) {                   /* empty doc still renders one line */
+        MDLine *L = push_line(doc, LT_BLANK);
+        L->height = f->bodyH;
+        L->y = 0;
+        doc->height = L->height;
+        return;
+    }
+
+    while (pos < total) {
         const wchar_t *ls = p + pos;
         int len = 0;
         while (pos + len < total && p[pos + len] != L'\n') len++;
@@ -483,7 +564,12 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
                 L = push_line(doc, LT_CODEPAD);
                 L->code = codeId;
                 L->height = 10;
+                L->y = y; y += L->height;
                 inCode = 0;
+                push_code_block(doc, codeId, codeStartY, y);
+                pos += advance;
+                if (pos > total) break;
+                continue;
             } else {
                 L = push_line(doc, LT_CODE);
                 L->code = codeId;
@@ -507,6 +593,7 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
             L->code = codeId;
             L->height = 10;
             L->y = y; y += L->height;
+            codeStartY = L->y;
             pos += advance;
             if (pos > total) break;
             continue;
@@ -519,6 +606,182 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
             pos += advance;
             if (pos > total) break;
             continue;
+        }
+
+        if (s[0] == L'|' || wmemchr(s, L'|', len) != NULL) {
+            /* peek next physical line for a GFM delimiter row */
+            int npos = pos + advance;
+            const wchar_t *ns = p + npos;
+            int nlenRaw = 0;
+            while (npos + nlenRaw < total && p[npos + nlenRaw] != L'\n')
+                nlenRaw++;
+            int nlen = nlenRaw;
+            while (nlen > 0 && ns[nlen - 1] == L'\r') nlen--;
+            int nlead = lead_spaces(ns, nlen);
+            if (npos <= total && nlen - nlead > 0
+                && is_delim_row(ns + nlead, nlen - nlead)) {
+                MDCell hc[MD_MAX_COLS];
+                int ncols = split_cells(s, len, hc);
+                if (ncols > 0) {
+                    char aligns[MD_MAX_COLS] = { 0 };
+                    {
+                        MDCell dc[MD_MAX_COLS];
+                        int nd = split_cells(ns + nlead, nlen - nlead, dc);
+                        for (int c = 0; c < ncols && c < nd; c++)
+                            aligns[c] = parse_align(dc[c].ptr, dc[c].len);
+                    }
+
+                    /* gather body rows while lines contain a pipe
+                     * (start past the delimiter row itself) */
+                    typedef struct { const wchar_t *s; int len; } RowRef;
+                    int capR = 16, nR = 0;
+                    RowRef *rows = (RowRef *)malloc(capR * sizeof(RowRef));
+                    int tpos = pos + advance + nlenRaw + 1;
+                    while (tpos < total) {
+                        const wchar_t *rs = p + tpos;
+                        int rlen = 0;
+                        while (tpos + rlen < total && p[tpos + rlen] != L'\n')
+                            rlen++;
+                        int radv = rlen + 1;
+                        while (rlen > 0 && rs[rlen - 1] == L'\r') rlen--;
+                        int rlead = lead_spaces(rs, rlen);
+                        if (rlen - rlead < 1
+                            || !wmemchr(rs + rlead, L'|', rlen - rlead))
+                            break;
+                        if (nR == capR) {
+                            capR *= 2;
+                            rows = (RowRef *)realloc(rows,
+                                                    capR * sizeof(RowRef));
+                        }
+                        rows[nR].s = rs + rlead;
+                        rows[nR].len = rlen - rlead;
+                        nR++;
+                        tpos += radv;
+                    }
+
+                    /* natural column widths (raw text, capped) */
+                    int natural[MD_MAX_COLS] = { 0 };
+                    int lineH2 = f->bodyH + (f->bodyH >> 1);
+                    for (int c = 0; c < ncols; c++) {
+                        int w = text_w(hdc, f->bold, hc[c].ptr, hc[c].len)
+                                + 2 * TB_PADX;
+                        natural[c] = w < 24 ? 24 : w;
+                    }
+                    MDCell (*rowCells)[MD_MAX_COLS] = NULL;
+                    if (nR) rowCells = (MDCell(*)[MD_MAX_COLS])
+                        calloc(nR, sizeof(MDCell) * MD_MAX_COLS);
+                    for (int r = 0; r < nR; r++) {
+                        int nc2 = split_cells(rows[r].s, rows[r].len,
+                                              rowCells[r]);
+                        for (int c = 0; c < nc2 && c < ncols; c++) {
+                            int w = text_w(hdc, f->body,
+                                           rowCells[r][c].ptr,
+                                           rowCells[r][c].len)
+                                    + 2 * TB_PADX;
+                            if (w > natural[c]) natural[c] = w;
+                        }
+                    }
+                    for (int c = 0; c < ncols; c++)
+                        if (natural[c] > 280) natural[c] = 280;
+
+                    /* distribute available width */
+                    int colW[MD_MAX_COLS];
+                    int availW = contentW;
+                    int sum = 0;
+                    for (int c = 0; c < ncols; c++) sum += natural[c];
+                    if (sum <= availW) {
+                        int extra = (availW - sum) / ncols;
+                        for (int c = 0; c < ncols; c++)
+                            colW[c] = natural[c] + extra;
+                    } else {
+                        for (int c = 0; c < ncols; c++) {
+                            int w = (int)((long long)natural[c] * availW
+                                          / sum);
+                            colW[c] = w < 48 ? 48 : w;
+                        }
+                        int over = 0;
+                        for (int c = 0; c < ncols; c++) over += colW[c];
+                        while (over > availW) {
+                            int cut = 0;
+                            for (int c = 0; c < ncols; c++) {
+                                if (colW[c] > 48) { colW[c]--; over--; cut = 1; }
+                                if (over <= availW) break;
+                            }
+                            if (!cut) break;
+                        }
+                    }
+
+                    /* emit header row */
+                    MDLine *H = push_line(doc, LT_TABLEROW);
+                    H->isHeader = 1;
+                    H->ncells = ncols;
+                    H->cells = (MDCell *)malloc(ncols * sizeof(MDCell));
+                    int hMaxH = 0;
+                    for (int c = 0; c < ncols; c++) {
+                        H->cells[c] = hc[c];
+                        RunBuf crb = { 0 };
+                        parse_inline(hc[c].ptr, hc[c].len, RF_BOLD, 0,
+                                     &crb, NULL, 0);
+                        MDLine tmp = { 0 };
+                        wrap_line(&tmp, &crb, f, hdc,
+                                  colW[c] - 2 * TB_PADX, lineH2, 0);
+                        free_runs(&crb);
+                        H->cells[c].subs = tmp.subs;
+                        H->cells[c].nsubs = tmp.nsubs;
+                        int hh = 0;
+                        for (int k = 0; k < tmp.nsubs; k++)
+                            hh += tmp.subs[k].height;
+                        if (hh > hMaxH) hMaxH = hh;
+                    }
+                    H->height = hMaxH + 2 * TB_PADY;
+                    H->y = y;
+                    y += H->height;
+                    memcpy(H->aligns, aligns, MD_MAX_COLS);
+                    memcpy(H->colW, colW, sizeof(int) * MD_MAX_COLS);
+
+                    /* emit body rows */
+                    for (int r = 0; r < nR; r++) {
+                        MDLine *B = push_line(doc, LT_TABLEROW);
+                        B->ncells = ncols;
+                        B->cells = (MDCell *)malloc(ncols * sizeof(MDCell));
+                        int rMaxH = 0;
+                        for (int c = 0; c < ncols; c++) {
+                            if (c < MD_MAX_COLS && rowCells[r][c].ptr)
+                                B->cells[c] = rowCells[r][c];
+                            else {
+                                B->cells[c].ptr = rows[r].s;
+                                B->cells[c].len = 0;
+                                B->cells[c].subs = NULL;
+                                B->cells[c].nsubs = 0;
+                            }
+                            if (B->cells[c].len == 0) continue;
+                            RunBuf crb = { 0 };
+                            parse_inline(B->cells[c].ptr, B->cells[c].len,
+                                         0, 0, &crb, NULL, 0);
+                            MDLine tmp = { 0 };
+                            wrap_line(&tmp, &crb, f, hdc,
+                                      colW[c] - 2 * TB_PADX, lineH2, 0);
+                            free_runs(&crb);
+                            B->cells[c].subs = tmp.subs;
+                            B->cells[c].nsubs = tmp.nsubs;
+                            int hh = 0;
+                            for (int k = 0; k < tmp.nsubs; k++)
+                                hh += tmp.subs[k].height;
+                            if (hh > rMaxH) rMaxH = hh;
+                        }
+                        B->height = rMaxH + 2 * TB_PADY;
+                        B->y = y;
+                        y += B->height;
+                        memcpy(B->aligns, aligns, MD_MAX_COLS);
+                        memcpy(B->colW, colW, sizeof(int) * MD_MAX_COLS);
+                    }
+                    free(rows);
+                    free(rowCells);
+                    pos = tpos;
+                    if (pos > total) break;
+                    continue;
+                }
+            }
         }
 
         if (s[0] == L'#') {
@@ -547,6 +810,12 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
             L = push_line(doc, LT_ITEM);
             L->depth = ls_spaces / 2;
             s += 2; len -= 2;
+            if (len >= 3 && s[0] == L'[' && s[2] == L']'
+                && (s[1] == L' ' || s[1] == L'x' || s[1] == L'X')) {
+                L->task = (s[1] == L' ') ? 1 : 2;
+                s += 3; len -= 3;
+                if (len > 0 && s[0] == L' ') { s++; len--; }
+            }
             goto have_line;
         }
 
@@ -583,7 +852,27 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
         if (pos > total) break;
     }
 
+    if (inCode) push_code_block(doc, codeId, codeStartY, y);
     doc->height = y;
+
+    /* cache run pixel widths once so painting never re-measures */
+    for (int li = 0; li < doc->nlines; li++) {
+        MDLine *L = &doc->lines[li];
+        int hl = (L->type >= LT_H1 && L->type <= LT_H6)
+                 ? L->type - LT_H1 + 1 : 0;
+        for (int k = 0; k < L->nsubs; k++)
+            for (int ri = 0; ri < L->subs[k].nruns; ri++) {
+                MDRun *r = &L->subs[k].runs[ri];
+                r->w = text_w(hdc, font_for(f, r->flags, hl), r->ptr, r->len);
+            }
+        for (int c = 0; c < L->ncells; c++)
+            for (int k = 0; k < L->cells[c].nsubs; k++)
+                for (int ri = 0; ri < L->cells[c].subs[k].nruns; ri++) {
+                    MDRun *r = &L->cells[c].subs[k].runs[ri];
+                    r->w = text_w(hdc, font_for(f, r->flags, 0),
+                                  r->ptr, r->len);
+                }
+    }
 }
 
 void md_free(MDDoc *doc)
@@ -594,8 +883,15 @@ void md_free(MDDoc *doc)
         for (int k = 0; k < L->nsubs; k++)
             free(L->subs[k].runs);
         free(L->subs);
+        for (int c = 0; c < L->ncells; c++) {
+            for (int k = 0; k < L->cells[c].nsubs; k++)
+                free(L->cells[c].subs[k].runs);
+            free(L->cells[c].subs);
+        }
+        free(L->cells);
     }
     free(doc->lines);
+    free(doc->codeBlocks);
     free(doc->text);
     ZeroMemory(doc, sizeof(*doc));
 }
@@ -622,20 +918,20 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
         const MDRun *r = &sub->runs[i];
         HFONT fo = font_for(f, r->flags, hl);
         HFONT old = (HFONT)SelectObject(hdc, fo);
-        TEXTMETRICW tm;
-        GetTextMetricsW(hdc, &tm);
-        int w = text_w(hdc, fo, r->ptr, r->len);
-        int ry = y + (sub->height - tm.tmHeight) / 2;
+        int tmH = (r->flags & RF_CODE) ? f->monoH
+                  : hl ? f->hH[hl - 1] : f->bodyH;
+        int w = r->w;
+        int ry = y + (sub->height - tmH) / 2;
 
         /* report clickable link rect to the host */
         if ((r->flags & RF_LINK) && g_linkSink && r->url && r->urlLen > 0
             && r->urlLen < 4096) {
-            RECT lrc = { x, ry, x + w, ry + tm.tmHeight };
+            RECT lrc = { x, ry, x + w, ry + tmH };
             g_linkSink(g_linkCtx, lrc, r->url, r->urlLen);
         }
 
         if (r->flags & RF_CODE) {
-            RECT rc = { x, ry, x + w + 4, ry + tm.tmHeight };
+            RECT rc = { x, ry, x + w + 4, ry + tmH };
             HRGN rg = CreateRoundRectRgn(rc.left, rc.top, rc.right, rc.bottom,
                                          6, 6);
             HBRUSH br = CreateSolidBrush(g_colCodeInlineBg);
@@ -649,8 +945,8 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
         if (r->flags & RF_IMAGE) col = g_colQuote;
 
         if (r->flags & RF_STRIKE) {
-            RECT rc = { x, ry + tm.tmHeight / 2, x + w,
-                        ry + tm.tmHeight / 2 + 1 };
+            RECT rc = { x, ry + tmH / 2, x + w,
+                        ry + tmH / 2 + 1 };
             HBRUSH br = CreateSolidBrush(col);
             FillRect(hdc, &rc, br);
             DeleteObject(br);
@@ -663,8 +959,8 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
         if (r->flags & RF_LINK) {
             HPEN pen = CreatePen(PS_SOLID, 1, g_colLink);
             HPEN op = (HPEN)SelectObject(hdc, pen);
-            MoveToEx(hdc, x, ry + tm.tmHeight, NULL);
-            LineTo(hdc, x + w, ry + tm.tmHeight);
+            MoveToEx(hdc, x, ry + tmH, NULL);
+            LineTo(hdc, x + w, ry + tmH);
             SelectObject(hdc, op);
             DeleteObject(pen);
         }
@@ -686,34 +982,31 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
     int viewTop = scrollY;
     int viewBottom = scrollY + (rc->bottom - rc->top);
 
-    /* pass 1: code block backgrounds */
-    int i = 0;
-    while (i < doc->nlines) {
-        if (doc->lines[i].code) {
-            int id = doc->lines[i].code;
-            int j = i, top = -1, bottom = -1;
-            while (j < doc->nlines && doc->lines[j].code == id) {
-                if (top < 0) top = doc->lines[j].y;
-                bottom = doc->lines[j].y + doc->lines[j].height;
-                j++;
-            }
-            if (bottom > viewTop && top < viewBottom) {
-                RECT cb = { rc->left + margin, top - scrollY + yOff,
-                            rc->left + margin + contentW,
-                            bottom - scrollY + yOff };
-                HRGN rg = CreateRoundRectRgn(cb.left, cb.top, cb.right,
-                                             cb.bottom, 14, 14);
-                HBRUSH br = CreateSolidBrush(g_colCodeBg);
-                FillRgn(hdc, rg, br);
-                DeleteObject(rg);
-                DeleteObject(br);
-            }
-            i = j;
-        } else i++;
+    /* pass 1: code block backgrounds (extents cached at build) */
+    for (int b = 0; b < doc->ncodeBlocks; b++) {
+        int top = doc->codeBlocks[b].top;
+        int bottom = doc->codeBlocks[b].bottom;
+        if (bottom <= viewTop || top >= viewBottom) continue;
+        RECT cb = { rc->left + margin, top - scrollY + yOff,
+                    rc->left + margin + contentW,
+                    bottom - scrollY + yOff };
+        HRGN rg = CreateRoundRectRgn(cb.left, cb.top, cb.right,
+                                     cb.bottom, 14, 14);
+        HBRUSH br = CreateSolidBrush(g_colCodeBg);
+        FillRgn(hdc, rg, br);
+        DeleteObject(rg);
+        DeleteObject(br);
     }
 
-    /* pass 2: content */
-    for (i = 0; i < doc->nlines; i++) {
+    /* pass 2: content -- binary-search the first visible line */
+    int lo = 0, hi = doc->nlines;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (doc->lines[mid].y + doc->lines[mid].height < viewTop)
+            lo = mid + 1;
+        else hi = mid;
+    }
+    for (int i = lo; i < doc->nlines; i++) {
         const MDLine *L = &doc->lines[i];
         int top = L->y - scrollY + yOff;
         int bottom = top + L->height;
@@ -746,6 +1039,69 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
             }
             break;
 
+        case LT_TABLEROW: {
+            /* header: light fill + heavier rule; rows: hairlines */
+            if (L->isHeader) {
+                RECT hb = { x, top, x + contentW, bottom };
+                HBRUSH br = CreateSolidBrush(g_colCodeBg);
+                FillRect(hdc, &hb, br);
+                DeleteObject(br);
+                HPEN pen = CreatePen(PS_SOLID, 2, g_colQuoteBar);
+                HPEN op = (HPEN)SelectObject(hdc, pen);
+                MoveToEx(hdc, x, bottom - 1, NULL);
+                LineTo(hdc, x + contentW, bottom - 1);
+                SelectObject(hdc, op);
+                DeleteObject(pen);
+            } else {
+                HPEN pen = CreatePen(PS_SOLID, 1, g_colHr);
+                HPEN op = (HPEN)SelectObject(hdc, pen);
+                MoveToEx(hdc, x, bottom - 1, NULL);
+                LineTo(hdc, x + contentW, bottom - 1);
+                SelectObject(hdc, op);
+                DeleteObject(pen);
+            }
+            /* vertical separators */
+            {
+                HPEN pen = CreatePen(PS_SOLID, 1, g_colHeadingRule);
+                HPEN op = (HPEN)SelectObject(hdc, pen);
+                int vx = x;
+                for (int c = 0; c < L->ncells; c++) {
+                    vx += L->colW[c];
+                    if (c == L->ncells - 1) break;
+                    MoveToEx(hdc, vx - 1, top, NULL);
+                    LineTo(hdc, vx - 1, bottom);
+                }
+                SelectObject(hdc, op);
+                DeleteObject(pen);
+            }
+            /* cells, honoring column alignment */
+            {
+                int vx = x;
+                for (int c = 0; c < L->ncells; c++) {
+                    MDCell *cell = &L->cells[c];
+                    int cw = L->colW[c];
+                    int cy = top + TB_PADY;
+                    for (int k = 0; k < cell->nsubs; k++) {
+                        MDSub *sub = &cell->subs[k];
+                        int subW = 0;
+                        for (int ri = 0; ri < sub->nruns; ri++)
+                            subW += sub->runs[ri].w
+                                    + (sub->runs[ri].flags & RF_CODE ? 4 : 0);
+                        int tx = vx + TB_PADX;
+                        if (L->aligns[c] == 1)
+                            tx = vx + (cw - subW) / 2;
+                        else if (L->aligns[c] == 2)
+                            tx = vx + cw - subW - TB_PADX;
+                        if (tx < vx + 2) tx = vx + 2;
+                        draw_runs(hdc, sub, tx, cy, f, g_colText, 0);
+                        cy += sub->height;
+                    }
+                    vx += cw;
+                }
+            }
+            break;
+        }
+
         case LT_QUOTE: {
             HPEN pen = CreatePen(PS_SOLID | PS_ENDCAP_ROUND, 3, g_colQuoteBar);
             HPEN op = (HPEN)SelectObject(hdc, pen);
@@ -762,6 +1118,37 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
 
         case LT_ITEM: {
             int bx = x + L->depth * 18;
+            if (L->task) {
+                /* 14x14 rounded checkbox, accent fill when checked */
+                int sz = 14;
+                int boxY = top + L->padTop + (f->bodyH - sz) / 2;
+                RECT cb = { bx, boxY, bx + sz, boxY + sz };
+                HRGN rg = CreateRoundRectRgn(cb.left, cb.top, cb.right,
+                                             cb.bottom, 4, 4);
+                HBRUSH br = CreateSolidBrush(
+                    L->task == 2 ? g_colLink : RGB(255, 255, 255));
+                FillRgn(hdc, rg, br);
+                DeleteObject(br);
+                FrameRgn(hdc, rg, CreateSolidBrush(
+                    L->task == 2 ? g_colLink : g_colQuoteBar), 1, 1);
+                DeleteObject(rg);
+                if (L->task == 2) {
+                    /* check mark */
+                    HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+                    HPEN op = (HPEN)SelectObject(hdc, pen);
+                    MoveToEx(hdc, bx + 3, boxY + 7, NULL);
+                    LineTo(hdc, bx + 6, boxY + 10);
+                    LineTo(hdc, bx + 11, boxY + 3);
+                    SelectObject(hdc, op);
+                    DeleteObject(pen);
+                }
+                for (int k = 0; k < L->nsubs; k++) {
+                    draw_runs(hdc, &L->subs[k], bx + 22, subY, f,
+                              g_colText, 0);
+                    subY += L->subs[k].height;
+                }
+                break;
+            }
             HFONT old = (HFONT)SelectObject(hdc, f->bold);
             SetTextColor(hdc, g_colText);
             SetBkMode(hdc, TRANSPARENT);
@@ -978,6 +1365,74 @@ static void h_inline(HtmlOut *o, const wchar_t *s, int len, int depth)
     }
 }
 
+/* delimiter row validity for html export (mirrors is_delim_row) */
+static int tbl_delim_ok(const wchar_t *s, int len)
+{
+    int dashes = 0, bars = 0;
+    for (int i = 0; i < len; i++) {
+        wchar_t c = s[i];
+        if (c == L'-') dashes++;
+        else if (c == L'|') bars++;
+        else if (c == L':' || c == L' ') continue;
+        else return 0;
+    }
+    return dashes >= 1 && bars >= 1;
+}
+
+/* emit one table row as <th>/<td> cells; when delim is given the
+ * per-column alignment is read from it */
+static void tbl_emit_row(HtmlOut *o, const wchar_t *s, int len, int head,
+                         const wchar_t *delim, int dlen)
+{
+    const wchar_t *cellStart[MD_MAX_COLS];
+    int cellLen[MD_MAX_COLS];
+    int n = 0;
+    int i = 0;
+    if (i < len && s[i] == L'|') i++;
+    while (i < len && n < MD_MAX_COLS) {
+        int j = i;
+        while (j < len && s[j] != L'|') j++;
+        int a = i, b = j;
+        while (a < b && iswspace(s[a])) a++;
+        while (b > a && iswspace(s[b - 1])) b--;
+        cellStart[n] = s + a;
+        cellLen[n] = b - a;
+        n++;
+        i = j + 1;
+    }
+    for (int c = 0; c < n; c++) {
+        char align = 0;
+        if (delim) {
+            /* walk the delimiter row to cell c */
+            int k = 0, ci = 0;
+            if (ci < dlen && delim[ci] == L'|') ci++;
+            while (ci < dlen && k < MD_MAX_COLS) {
+                int j = ci;
+                while (j < dlen && delim[j] != L'|') j++;
+                if (k == c) {
+                    int first = -1, last = -1;
+                    for (int t = ci; t < j; t++)
+                        if (delim[t] == L':') {
+                            if (first < 0) first = t;
+                            last = t;
+                        }
+                    if (first == ci && last == j - 1 && j > ci) align = 1;
+                    else if (last == j - 1 && j > ci) align = 2;
+                    break;
+                }
+                k++;
+                ci = j + 1;
+            }
+        }
+        h_app(o, head ? "<th" : "<td");
+        if (align == 1) h_app(o, " style=\"text-align:center\"");
+        if (align == 2) h_app(o, " style=\"text-align:right\"");
+        h_app(o, ">");
+        h_inline(o, cellStart[c], cellLen[c], 0);
+        h_app(o, head ? "</th>\n" : "</td>\n");
+    }
+}
+
 /* convert src to a full standalone HTML document (UTF-8). returns the
  * byte length, *out must be freed by the caller. 0 on error. */
 int md_to_html(const wchar_t *src, int srcLen, char **out)
@@ -1064,6 +1519,51 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             continue;
         }
 
+        if (s[0] == L'|' || wmemchr(s, L'|', sl) != NULL) {
+            /* GFM table: header + delimiter row + body rows */
+            int npos2 = pos + adv;
+            const wchar_t *ns2 = src + npos2;
+            int nlenRaw2 = 0;
+            while (npos2 + nlenRaw2 < srcLen
+                   && src[npos2 + nlenRaw2] != L'\n') nlenRaw2++;
+            int nlen2 = nlenRaw2;
+            while (nlen2 > 0 && ns2[nlen2 - 1] == L'\r') nlen2--;
+            int nlead2 = 0;
+            while (nlead2 < nlen2 && ns2[nlead2] == L' ') nlead2++;
+            if (npos2 <= srcLen && nlen2 - nlead2 > 0
+                && tbl_delim_ok(ns2 + nlead2, nlen2 - nlead2)) {
+                if (inP) { h_app(&o, "</p>\n"); inP = 0; }
+                if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
+                if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
+                if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
+                h_app(&o, "<table>\n<thead>\n<tr>\n");
+                tbl_emit_row(&o, s, sl, 1, ns2 + nlead2, nlen2 - nlead2);
+                h_app(&o, "</tr>\n</thead>\n<tbody>\n");
+                pos = npos2 + nlenRaw2 + 1;   /* past the delimiter row */
+                while (pos < srcLen) {
+                    const wchar_t *rs2 = src + pos;
+                    int rlen2 = 0;
+                    while (pos + rlen2 < srcLen
+                           && src[pos + rlen2] != L'\n') rlen2++;
+                    int radv2 = rlen2 + 1;
+                    while (rlen2 > 0 && rs2[rlen2 - 1] == L'\r') rlen2--;
+                    int rlead2 = 0;
+                    while (rlead2 < rlen2 && rs2[rlead2] == L' ') rlead2++;
+                    if (rlen2 - rlead2 < 1
+                        || !wmemchr(rs2 + rlead2, L'|', rlen2 - rlead2))
+                        break;
+                    h_app(&o, "<tr>\n");
+                    tbl_emit_row(&o, rs2 + rlead2, rlen2 - rlead2, 0,
+                                 NULL, 0);
+                    h_app(&o, "</tr>\n");
+                    pos += radv2;
+                }
+                h_app(&o, "</tbody>\n</table>\n");
+                if (pos > srcLen) break;
+                continue;
+            }
+        }
+
         if (s[0] == L'#') {
             int lv = 0;
             while (lv < sl && lv < 6 && s[lv] == L'#') lv++;
@@ -1104,12 +1604,30 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
 
         if ((s[0] == L'-' || s[0] == L'*' || s[0] == L'+')
             && sl > 1 && s[1] == L' ') {
+            const wchar_t *item = s + 2;
+            int il = sl - 2;
+            int task = 0;
+            if (il >= 3 && item[0] == L'[' && item[2] == L']'
+                && (item[1] == L' ' || item[1] == L'x'
+                    || item[1] == L'X')) {
+                task = (item[1] == L' ') ? 1 : 2;
+                item += 3;
+                il -= 3;
+                if (il > 0 && item[0] == L' ') { item++; il--; }
+            }
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
             if (inQ) { h_app(&o, "</blockquote>\n"); inQ = 0; }
-            if (!inUl) { h_app(&o, "<ul>\n"); inUl = 1; }
+            if (!inUl) {
+                h_app(&o, task ? "<ul class=\"task\">\n" : "<ul>\n");
+                inUl = 1;
+            }
             h_app(&o, "<li>");
-            h_inline(&o, s + 2, sl - 2, 0);
+            if (task)
+                h_app(&o, task == 2
+                           ? "<input type=\"checkbox\" disabled checked>"
+                           : "<input type=\"checkbox\" disabled>");
+            h_inline(&o, item, il, 0);
             h_app(&o, "</li>\n");
             pos += adv;
             if (pos > srcLen) break;
