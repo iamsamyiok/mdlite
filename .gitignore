@@ -1,0 +1,24 @@
+# 构建产物
+*.exe
+*.o
+*.a
+*.dll
+
+# 截图
+screenshot_*.png
+edit.png
+preview.png
+split.png
+
+# base64 编码
+*.b64.js
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
