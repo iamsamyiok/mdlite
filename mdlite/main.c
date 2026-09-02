@@ -496,7 +496,10 @@ static const wchar_t *HELP_TEXT =
     L"【文件】\r\n"
     L"Ctrl+N 新建，Ctrl+O 打开，Ctrl+S 保存，Ctrl+Shift+S 另存；拖拽 .md 直接打开。\r\n"
     L"自动保存：设置中可配间隔（秒，0=关闭），默认 60 秒。\r\n"
-    L"文件树：Ctrl+B 切换左侧工作区文件列表；Enter 打开，双击目录展开/折叠，Esc 关闭。\r\n"
+    L"文件树（Ctrl+B）：标题栏右侧三个工具按钮——新建文件、新建文件夹、\r\n"
+    L"  折叠全部；Enter 或单击打开文件，双击目录展开/折叠；右键菜单：\r\n"
+    L"  打开、新建文件/文件夹（目录上）、重命名、复制文件地址/文件名、\r\n"
+    L"  删除（进回收站）；Enter 确认命名，Esc 取消。\r\n"
     L"\r\n"
     L"【编辑】\r\n"
     L"查找：Ctrl+F，替换：Ctrl+H；Enter 查找下一个，Shift+Enter 上一个；\r\n"
@@ -505,11 +508,10 @@ static const wchar_t *HELP_TEXT =
     L"括号：输入 [ ( { 自动配对并可包裹选区；输入 ) ] } 跳出配对；退格删除整对。\r\n"
     L"\r\n"
     L"【斜杠命令】\r\n"
-    L"输入 / 弹出块命令菜单：问 AI、Agent、标题、任务/无序/有序列表、\r\n"
-    L"  代码块、表格、引用块、提示框、突出显示、帽头、分隔线、今日日期。\r\n"
-    L"  输入即过滤，↑↓ 选择，Enter/Tab 应用，Esc 关闭。\r\n"
-    L"  过滤无匹配时菜单自动消失：行首 /问题 + Enter 仍是 AI 问答，\r\n"
-    L"  //命令 + Enter 仍是 Agent，两种老用法不受影响。\r\n"
+    L"输入 / 弹出块命令菜单：任务/无序/有序列表、代码块、表格、引用块、\r\n"
+    L"  提示框、突出显示、帽头、分隔线、今日日期（11 项）。\r\n"
+    L"  输入即过滤，↑↓ 选择，Enter/Tab 应用，Esc 关闭；弹窗高度随条目\r\n"
+    L"  数量自适应。标题直接用 # 手打更快，故不进菜单。\r\n"
     L"\r\n"
     L"【双链与图谱】\r\n"
     L"双链补全：输入 [[ 自动弹出工作区笔记列表，继续输入过滤，\r\n"
@@ -530,8 +532,8 @@ static const wchar_t *HELP_TEXT =
     L"  图片、脚注等 17 项），输入过滤、Enter 插入、Esc 关闭。\r\n"
     L"\r\n"
     L"【AI 与 Agent】\r\n"
-    L"AI：行首输入 /问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
-    L"Agent：行首输入 //任务 后回车，调用 opencode 在文档目录执行，\r\n"
+    L"AI：行首输入 //问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
+    L"Agent：行首输入 ///任务 后回车，调用 opencode 在文档目录执行，\r\n"
     L"  Esc 终止；超时秒数可在设置中调整。\r\n"
     L"\r\n"
     L"【其他】\r\n"
@@ -540,7 +542,7 @@ static const wchar_t *HELP_TEXT =
     L"历史：点「历史」查看版本，点击恢复；行右侧 ✕ 删除单条；上限在设置中调整。\r\n"
     L"热键：设置中可配全局呼出热键（默认 Ctrl+Shift+Space）。\r\n"
     L"托盘：关闭窗口最小化到托盘，右键退出。\r\n"
-    L"本帮助：标题栏「?」按钮或更多菜单「帮助」，F1 亦可打开。";
+    L"本帮助：更多菜单「帮助」或 F1 打开。";
 
 static LRESULT CALLBACK HelpProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -604,6 +606,11 @@ static RECT BtnRect(int id);
 static void ShowMoreMenu(void)
 {
     HMENU pm = CreatePopupMenu();
+    AppendMenuW(pm, MF_STRING, IDM_TREEBAR,   L"文件树\tCtrl+B");
+    AppendMenuW(pm, MF_STRING, IDM_HISTORY,   L"历史");
+    AppendMenuW(pm, MF_STRING, IDM_SETTINGS,  L"配置\tCtrl+,");
+    AppendMenuW(pm, MF_STRING, IDM_HELP,      L"帮助\tF1");
+    AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     AppendMenuW(pm, MF_STRING, IDM_OUTLINE,    L"大纲\tCtrl+P");
     AppendMenuW(pm, MF_STRING, IDM_LINKS,      L"反向链接与孤儿笔记\tCtrl+Shift+L");
     AppendMenuW(pm, MF_STRING, IDM_GRAPH,      L"知识图谱\tCtrl+G");
@@ -635,7 +642,7 @@ static void ShowMoreMenu(void)
     AppendMenuW(pm, MF_STRING, IDM_PRINT,      L"打印 / 导出 PDF…");
     AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     AppendMenuW(pm, MF_STRING, IDM_HELP,       L"帮助");
-    POINT pt = { BtnRect(4).left, BtnRect(4).bottom + SC(2) };
+    POINT pt = { BtnRect(2).left, BtnRect(2).bottom + SC(2) };
     ClientToScreen(g_hwnd, &pt);
     int cmd = TrackPopupMenu(pm, TPM_LEFTALIGN | TPM_RIGHTBUTTON
                                 | TPM_RETURNCMD, pt.x, pt.y, 0, g_hwnd, NULL);
@@ -862,26 +869,11 @@ static void ApplyZoom(int dir)
 /* header widgets                                                      */
 /* ------------------------------------------------------------------ */
 
-static RECT BtnRect(int id) /* 0 open 1 save 2 history 3 settings 4 more 5 topmost 6 files 7 help */
+static RECT BtnRect(int id) /* 0 open 1 save 2 more 3 topmost */
 {
     RECT rc;
-    if (id == 7) {                 /* help button right of files */
-        rc.left = SC(14) + 5 * (SC(64) + SC(8))
-                  + 2 * (SC(48) + SC(8));
-        rc.top = SC(10);
-        rc.right = rc.left + SC(48);
-        rc.bottom = rc.top + SC(28);
-        return rc;
-    }
-    if (id == 6) {                 /* narrow tree toggle right of topmost */
-        rc.left = SC(14) + 5 * (SC(64) + SC(8)) + SC(48) + SC(8);
-        rc.top = SC(10);
-        rc.right = rc.left + SC(48);
-        rc.bottom = rc.top + SC(28);
-        return rc;
-    }
-    if (id == 5) {                 /* narrow pin toggle right of "more" */
-        rc.left = SC(14) + 5 * (SC(64) + SC(8));
+    if (id == 3) {                 /* narrow pin toggle right of more */
+        rc.left = SC(14) + 2 * (SC(64) + SC(8));
         rc.top = SC(10);
         rc.right = rc.left + SC(48);
         rc.bottom = rc.top + SC(28);
@@ -911,7 +903,7 @@ static int HitTestHeader(POINT pt)
 {
     POINT p = pt;
     if (p.y < 0 || p.y > HeaderH()) return -1;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         RECT r = BtnRect(i);
         if (PtInRect(&r, p)) return i;
     }
@@ -1756,10 +1748,9 @@ static void DrawHeader(HDC dc, RECT *rcClient)
     DeleteObject(br);
 
     /* buttons - pill shape */
-    static const wchar_t *labels[5] =
-        { L"\x25B6 打开", L"\x25A0 保存", L"\x2630 历史", L"\x2699 配置",
-          L"\x22EF 更多" };
-    for (int i = 0; i < 5; i++) {
+    static const wchar_t *labels[3] =
+        { L"\x25B6 打开", L"\x25A0 保存", L"\x22EF 更多" };
+    for (int i = 0; i < 3; i++) {
         RECT r = BtnRect(i);
         int hot = (g_hoverId == i);
         DrawRoundRect(dc, &r, SC(14), hot ? COL_BTNHVR : RGB(255,255,255),
@@ -1779,12 +1770,12 @@ static void DrawHeader(HDC dc, RECT *rcClient)
     /* topmost toggle - accent-styled while active */
     {
         static const wchar_t *pin = L"置顶";
-        RECT r = BtnRect(5);
-        int hot = (g_hoverId == 5);
+        RECT r = BtnRect(3);
+        int hot = (g_hoverId == 3);
         int on = g_topmost;
         DrawRoundRect(dc, &r, SC(14),
                       on ? RGB(0xE3, 0xEE, 0xFF)
-                         : (hot ? COL_BTNHVR : RGB(255,255,255)),
+                         : (hot ? COL_BTNHVR : RGB(255, 255, 255)),
                       on ? COL_ACCENT : COL_BTNBRD, 1);
         HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
         SetTextColor(dc, on ? COL_ACCENT : COL_BTNTXT);
@@ -1795,48 +1786,6 @@ static void DrawHeader(HDC dc, RECT *rcClient)
         GetTextMetricsW(dc, &tm);
         int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
         TextOutW(dc, tx, ty, pin, lstrlenW(pin));
-        SelectObject(dc, old);
-    }
-
-    /* file-tree toggle - accent-styled while shown */
-    {
-        static const wchar_t *fl = L"文件";
-        RECT r = BtnRect(6);
-        int hot = (g_hoverId == 6);
-        int on = TreeShown();
-        DrawRoundRect(dc, &r, SC(14),
-                      on ? RGB(0xE3, 0xEE, 0xFF)
-                         : (hot ? COL_BTNHVR : RGB(255,255,255)),
-                      on ? COL_ACCENT : COL_BTNBRD, 1);
-        HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
-        SetTextColor(dc, on ? COL_ACCENT : COL_BTNTXT);
-        SetBkMode(dc, TRANSPARENT);
-        int tx = r.left + (r.right - r.left) / 2
-                 - text_w(dc, g_fontHeader, fl, lstrlenW(fl)) / 2;
-        TEXTMETRICW tm;
-        GetTextMetricsW(dc, &tm);
-        int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
-        TextOutW(dc, tx, ty, fl, lstrlenW(fl));
-        SelectObject(dc, old);
-    }
-
-    /* help button - plain white pill with "?" */
-    {
-        static const wchar_t *q = L"?";
-        RECT r = BtnRect(7);
-        int hot = (g_hoverId == 7);
-        DrawRoundRect(dc, &r, SC(14),
-                      hot ? COL_BTNHVR : RGB(255, 255, 255),
-                      COL_BTNBRD, 1);
-        HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
-        SetTextColor(dc, COL_BTNTXT);
-        SetBkMode(dc, TRANSPARENT);
-        int tx = r.left + (r.right - r.left) / 2
-                 - text_w(dc, g_fontHeader, q, lstrlenW(q)) / 2;
-        TEXTMETRICW tm;
-        GetTextMetricsW(dc, &tm);
-        int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
-        TextOutW(dc, tx, ty, q, lstrlenW(q));
         SelectObject(dc, old);
     }
 
@@ -2623,11 +2572,11 @@ static const InsItem INS_ITEMS[] = {
     { L"三级标题", L"\r\n### ", L"标题", L"" },
     { L"无序列表", L"\r\n", L"- 列表项", L"" },
     { L"有序列表", L"\r\n", L"1. 列表项", L"" },
-    { L"任务列表", L"\r\n", L"- [ ] 任务", L"" },
-    { L"引用块",   L"\r\n", L"> 引用内容", L"" },
+    { L"任务列表", L"\r\n- [ ] ", L"任务", L"" },
+    { L"引用块",   L"\r\n", L"> 引用内容", L"\r\n" },
     { L"表格",     L"\r\n",
-      L"| 列一 | 列二 |\r\n| --- | --- |\r\n| 内容 | 内容 |", L"" },
-    { L"代码块",   L"\r\n```\r\n", L"代码", L"\r\n```" },
+      L"| 列一 | 列二 |\r\n| --- | --- |\r\n| 内容 | 内容 |", L"\r\n" },
+    { L"代码块",   L"\r\n```\r\n", L"代码", L"\r\n```\r\n" },
     { L"行内代码", L"`", L"代码", L"`" },
     { L"粗体",     L"**", L"粗体文本", L"**" },
     { L"斜体",     L"*", L"斜体文本", L"*" },
@@ -2785,6 +2734,8 @@ static LRESULT CALLBACK InsertProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 #define WK_MAX_NAMES 500
 #define WK_MAX_VIS   256
+static void WkResize(void);
+static void SlResize(void);
 static HWND  g_wkWnd, g_wkList;
 static wchar_t (*g_wkNames)[96];
 static int   g_wkNameN;
@@ -2792,6 +2743,7 @@ static int   g_wkVis[WK_MAX_VIS];
 static int   g_wkVisN;
 static int   g_wkFilterLen;      /* filter length at last check */
 static int   g_wkAnchor;         /* abs pos just after "[[" */
+static int   g_wkHH;             /* current popup height */
 
 void HideWikiMenu(void)
 {
@@ -2856,6 +2808,20 @@ static void WkFill(const wchar_t *filter, int flen)
         }
     }
     if (g_wkVisN > 0) SendMessageW(g_wkList, LB_SETCURSEL, 0, 0);
+    WkResize();
+}
+
+/* size the popup to the visible row count (max 10 rows) */
+static void WkResize(void)
+{
+    if (!g_wkWnd) return;
+    int rows = g_wkVisN;
+    if (rows < 1) rows = 1;
+    if (rows > 10) rows = 10;
+    g_wkHH = SC(8) + rows * SC(26);
+    SetWindowPos(g_wkWnd, NULL, 0, 0, SC(260), g_wkHH,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    MoveWindow(g_wkList, 0, 0, SC(260), g_wkHH, TRUE);
 }
 
 static void WkApply(void)
@@ -2909,7 +2875,7 @@ static void WkPosition(void)
     GetBodyRect(&rcBody);
     int x = rcBody.left + pt.x;
     int y = rcBody.top + pt.y + SC(20);
-    int w = SC(260), hh = SC(180);
+    int w = SC(260), hh = g_wkHH ? g_wkHH : SC(180);
     RECT rcWnd;
     GetWindowRect(g_hwnd, &rcWnd);
     if (x + w > rcBody.right) x = rcBody.right - w;
@@ -2937,32 +2903,28 @@ void WikiCompleteCheck(HWND edit)
     *(LPWORD)buf = (WORD)(sizeof(buf) / sizeof(wchar_t) - 1);
     int got = (int)SendMessageW(g_edit, EM_GETLINE, li, (LPARAM)buf);
     if (got > 0) buf[got] = 0; else buf[0] = 0;
-    /* need "[[" right before the filter word */
-    if (off < 2 || buf[off-1] != L'[' || buf[off-2] != L'[') {
-        HideWikiMenu();
-        return;
+    /* find "[[" ending right before the filter word:
+     * either the caret sits just after "[[" (empty filter), or the
+     * scan-back over the filter stops at a '[' that forms "[[" */
+    int e = -1;
+    if (off >= 2 && buf[off-1] == L'[' && buf[off-2] == L'[') {
+        e = off;                     /* just typed "[[" */
+    } else {
+        int b = off;
+        while (b > 0 && buf[b-1] != L'[' && buf[b-1] != L']'
+               && (off - b) < 64)
+            b--;
+        if (b >= 2 && buf[b-1] == L'[' && buf[b-2] == L'[') e = b;
     }
-    /* filter word: from after "[[" up to the caret; stop at any bracket */
-    int fwEnd = off;
-    int fwBegin = off - 2;
-    while (fwBegin > 0 && buf[fwBegin-1] != L'['
-           && buf[fwBegin-1] != L']' && (off - fwBegin) < 64)
-        fwBegin--;
-    if (fwBegin > 0 && (buf[fwBegin-1] == L']')) { HideWikiMenu(); return; }
-    /* the two chars at fwBegin-1, fwBegin must be "[[" */
-    if (!(fwBegin >= 2 && buf[fwBegin-1] == L'[' && buf[fwBegin-2] == L'[')) {
-        /* allow exactly the "[[" typed right before caret */
-        if (fwBegin != off - 2) { HideWikiMenu(); return; }
-        fwBegin = off - 2;
-    }
-    int flen = fwEnd - fwBegin;
+    if (e < 0) { HideWikiMenu(); return; }
+    int flen = off - e;
     if (flen > 64) { HideWikiMenu(); return; }
 
     if (!g_wkWnd) ShowWikiMenu();
     if (!g_wkWnd) return;
     g_wkFilterLen = flen;
-    g_wkAnchor = ls + fwBegin;
-    WkFill(buf + fwBegin, flen);
+    g_wkAnchor = ls + e;
+    WkFill(buf + e, flen);
     if (g_wkVisN == 0) { HideWikiMenu(); return; }
     WkPosition();
 }
@@ -2996,8 +2958,7 @@ void WikiCompleteKey(HWND edit, UINT vk, BOOL *eaten)
 /* and "//cmd" keeps working as the agent prompt.                      */
 /* ------------------------------------------------------------------ */
 
-enum { SL_TEXT = 0, SL_FRONTMATTER = 11, SL_DATE = 13,
-       SL_ASK = 14, SL_AGENT = 15 };
+enum { SL_TEXT = 0, SL_FRONTMATTER = 11, SL_DATE = 13 };
 
 typedef struct {
     const wchar_t *label;
@@ -3006,20 +2967,15 @@ typedef struct {
 } SlItem;
 
 static const SlItem SLASH_ITEMS[] = {
-    { L"问 AI",    NULL, NULL, NULL, SL_ASK },
-    { L"Agent",    NULL, NULL, NULL, SL_AGENT },
-    { L"一级标题", L"\r\n# ",  L"标题", L"", 0 },
-    { L"二级标题", L"\r\n## ", L"标题", L"", 0 },
-    { L"三级标题", L"\r\n### ", L"标题", L"", 0 },
     { L"任务列表", L"\r\n- [ ] ", L"任务", L"", 0 },
     { L"无序列表", L"\r\n", L"- 列表项", L"", 0 },
     { L"有序列表", L"\r\n", L"1. 列表项", L"", 0 },
-    { L"代码块",   L"\r\n```\r\n", L"代码", L"\r\n```", 0 },
+    { L"代码块",   L"\r\n```\r\n", L"代码", L"\r\n```\r\n", 0 },
     { L"表格",     L"\r\n| 列一 | 列二 |\r\n| --- | --- |\r\n"
-                   L"| 内容 | 内容 |", L"", L"", 0 },
-    { L"引用块",   L"\r\n", L"> 引用内容", L"", 0 },
-    { L"提示框",   L"\r\n> [!NOTE] ", L"标题", L"\r\n> 正文", 0 },
-    { L"突出显示", L"\r\n==", L"重点内容", L"==", 0 },
+                   L"| 内容 | 内容 |", L"", L"\r\n", 0 },
+    { L"引用块",   L"\r\n", L"> 引用内容", L"\r\n", 0 },
+    { L"提示框",   L"\r\n> [!NOTE] ", L"标题", L"\r\n> 正文\r\n", 0 },
+    { L"突出显示", L"\r\n==", L"重点内容", L"==\r\n", 0 },
     { L"帽头",     NULL, NULL, NULL, SL_FRONTMATTER },
     { L"分隔线",   L"\r\n---\r\n", L"", L"", 0 },
     { L"今日日期", NULL, NULL, NULL, SL_DATE },
@@ -3030,6 +2986,7 @@ static HWND g_slWnd, g_slList;
 static int  g_slVis[SL_N];
 static int  g_slVisN;
 static int  g_slAnchor;        /* abs pos just after the '/' */
+static int  g_slHH;            /* current popup height */
 
 void HideSlashMenu(void)
 {
@@ -3070,6 +3027,20 @@ static void SlFill(const wchar_t *filter, int flen)
         }
     }
     if (g_slVisN > 0) SendMessageW(g_slList, LB_SETCURSEL, 0, 0);
+    SlResize();
+}
+
+/* size the popup to the visible row count (max 10 rows) */
+static void SlResize(void)
+{
+    if (!g_slWnd) return;
+    int rows = g_slVisN;
+    if (rows < 1) rows = 1;
+    if (rows > 10) rows = 10;
+    g_slHH = SC(8) + rows * SC(26);
+    SetWindowPos(g_slWnd, NULL, 0, 0, SC(260), g_slHH,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    MoveWindow(g_slList, 0, 0, SC(260), g_slHH, TRUE);
 }
 
 /* replace "/filter" at the caret with the chosen command */
@@ -3099,22 +3070,6 @@ static void SlApply(void)
             L"%04d-%02d-%02d\r\n---\r\n",
             st.wYear, st.wMonth, st.wDay);
         selAt = 12; selLen = 2;    /* select the 标题 placeholder */
-    } else if (it->id == SL_ASK || it->id == SL_AGENT) {
-        /* put the '/' or '//' at the start of the current line so the
-         * existing Enter-to-ask flow picks it up */
-        int li = (int)SendMessageW(g_edit, EM_LINEFROMCHAR, s0, 0);
-        int ls = (int)SendMessageW(g_edit, EM_LINEINDEX, li, 0);
-        HideSlashMenu();
-        int pfx = (it->id == SL_AGENT) ? 2 : 1;
-        SendMessageW(g_edit, EM_SETSEL, ls, ls);
-        if (pfx == 2) SendMessageW(g_edit, EM_REPLACESEL,
-                                   TRUE, (LPARAM)L"//");
-        else          SendMessageW(g_edit, EM_REPLACESEL,
-                                   TRUE, (LPARAM)L"/");
-        SendMessageW(g_edit, EM_SETSEL, ls + pfx, ls + pfx);
-        SendMessageW(g_edit, EM_SCROLLCARET, 0, 0);
-        SetFocus(g_edit);
-        return;
     } else {
         /* plain text snippet - same semantics as the @ insert menu */
         const wchar_t *parts[3] = { it->before, it->sel, it->after };
@@ -3156,12 +3111,12 @@ static void ShowSlashMenu(void)
     if (g_slWnd) return;
     g_slWnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"STATIC", NULL, WS_POPUP,
-        0, 0, SC(240), SC(200), g_hwnd, NULL, NULL, NULL);
+        0, 0, SC(260), SC(200), g_hwnd, NULL, NULL, NULL);
     if (!g_slWnd) return;
     g_slList = CreateWindowExW(0, L"LISTBOX", NULL,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY
         | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
-        0, 0, SC(240), SC(200), g_slWnd, (HMENU)4, NULL, NULL);
+        0, 0, SC(260), SC(200), g_slWnd, (HMENU)4, NULL, NULL);
     SendMessageW(g_slList, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
 }
 
@@ -3176,7 +3131,7 @@ static void SlPosition(void)
     GetBodyRect(&rcBody);
     int x = rcBody.left + pt.x;
     int y = rcBody.top + pt.y + SC(20);
-    int w = SC(240), hh = SC(200);
+    int w = SC(260), hh = g_slHH ? g_slHH : SC(200);
     RECT rcWnd;
     GetWindowRect(g_hwnd, &rcWnd);
     if (x + w > rcBody.right) x = rcBody.right - w;
@@ -3671,6 +3626,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             else ShowLinks();
             return 0;
         case IDM_HELP:       ShowHelp();            return 0;
+        case IDM_HISTORY:    ShowHistoryMenu();     return 0;
         }
         return 0;
 
@@ -3795,12 +3751,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int id = HitTestHeader((POINT){ px, py });
         if (id == 0) { if (ConfirmDiscard()) DoOpen(); }
         else if (id == 1) DoSave();
-        else if (id == 2) ShowHistoryMenu();
-        else if (id == 3) ShowSettings();
-        else if (id == 4) ShowMoreMenu();
-        else if (id == 5) { SetTopmost(!g_topmost); SaveSettings(); }
-        else if (id == 6) { TreeToggle(); SaveSettings(); }
-        else if (id == 7) ShowHelp();
+        else if (id == 2) ShowMoreMenu();
+        else if (id == 3) { SetTopmost(!g_topmost); SaveSettings(); }
         else if (id >= 10 && id <= 12) SetView(id - 10);
         return 0;
     }
@@ -3885,6 +3837,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+
+    case WM_CONTEXTMENU:
+        /* workspace tree context menu eats right-clicks inside the tree */
+        if (TreeContextMenu(lp)) return 0;
+        break;
 
     case WM_LBUTTONUP:
         if (g_splitDrag) {

@@ -26,6 +26,9 @@ static wchar_t g_wsDir[MAX_PATH];    /* "" = no workspace */
 static BOOL g_shown;
 static int  g_scroll;
 static int  g_hover;                 /* visible row under cursor, -1 none */
+static void TreeToolRect(RECT *r, int i, const RECT *rcTree);
+static int  g_toolHover;             /* header tool hover, -1 none */
+static int  RowAt(POINT pt, const RECT *rcClient);
 
 static TreeNode *g_vis[TREE_MAX_VIS];
 static int g_visN;
@@ -250,12 +253,8 @@ void TreeDraw(HDC dc, const RECT *rcClient)
 
     Flatten();
 
-    /* header row: folder name */
+    /* header row: fixed title + tool buttons */
     {
-        const wchar_t *base = wcsrchr(g_wsDir, L'\\');
-        base = base ? base + 1 : g_wsDir;
-        wchar_t title[96];
-        wsprintfW(title, L"工作区：%s", base);
         RECT rh = { rc.left, rc.top, rc.right, rc.top + TreeHeaderH() };
         HBRUSH hb = CreateSolidBrush(RGB(0xEE, 0xEE, 0xF1));
         FillRect(dc, &rh, hb);
@@ -269,10 +268,66 @@ void TreeDraw(HDC dc, const RECT *rcClient)
         HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(0x1D, 0x1D, 0x1F));
-        RECT txt = { rh.left + SC(12), rh.top, rh.right - SC(8), rh.bottom };
-        DrawTextW(dc, title, -1, &txt,
+        RECT txt = { rh.left + SC(12), rh.top, rh.right - SC(100), rh.bottom };
+        DrawTextW(dc, L"工作区", -1, &txt,
                   DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(dc, old);
+
+        /* tool buttons: new file / new folder / collapse all */
+        for (int i = 0; i < 3; i++) {
+            RECT r;
+            TreeToolRect(&r, i, &rc);
+            int hot = (g_toolHover == i);
+            if (hot) {
+                HBRUSH hb2 = CreateSolidBrush(RGB(0xDD, 0xDD, 0xE2));
+                FillRect(dc, &r, hb2);
+                DeleteObject(hb2);
+            }
+            HPEN tp = CreatePen(PS_SOLID, 1,
+                                hot ? RGB(0x00, 0x62, 0xCC)
+                                    : RGB(0x6E, 0x6E, 0x73));
+            HPEN top = (HPEN)SelectObject(dc, tp);
+            int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+            int s = SC(8);
+            if (i == 0) {            /* document sheet */
+                MoveToEx(dc, cx - s / 2, cy - s, NULL);
+                LineTo(dc, cx + s / 3, cy - s);
+                LineTo(dc, cx + s / 2, cy - s * 2 / 3);
+                LineTo(dc, cx + s / 2, cy + s);
+                LineTo(dc, cx - s / 2, cy + s);
+                LineTo(dc, cx - s / 2, cy - s);
+                MoveToEx(dc, cx + s / 3, cy - s, NULL);
+                LineTo(dc, cx + s / 3, cy - s * 2 / 3);
+                LineTo(dc, cx + s / 2, cy - s * 2 / 3);
+                /* small + */
+                MoveToEx(dc, cx + s / 4, cy + s / 2, NULL);
+                LineTo(dc, cx + s / 4 + SC(6), cy + s / 2);
+                MoveToEx(dc, cx + s / 4 + SC(3), cy + s / 2 - SC(3), NULL);
+                LineTo(dc, cx + s / 4 + SC(3), cy + s / 2 + SC(3));
+            } else if (i == 1) {     /* folder */
+                MoveToEx(dc, cx - s, cy - s / 3, NULL);
+                LineTo(dc, cx - s / 3, cy - s / 3);
+                LineTo(dc, cx, cy - s * 2 / 3);
+                LineTo(dc, cx + s, cy - s * 2 / 3);
+                LineTo(dc, cx + s, cy + s * 2 / 3);
+                LineTo(dc, cx - s, cy + s * 2 / 3);
+                LineTo(dc, cx - s, cy - s / 3);
+                /* small + */
+                MoveToEx(dc, cx + s / 3, cy, NULL);
+                LineTo(dc, cx + s / 3 + SC(6), cy);
+                MoveToEx(dc, cx + s / 3 + SC(3), cy - SC(3), NULL);
+                LineTo(dc, cx + s / 3 + SC(3), cy + SC(3));
+            } else {                 /* collapse: double chevron down */
+                MoveToEx(dc, cx - SC(5), cy - SC(3), NULL);
+                LineTo(dc, cx, cy + SC(1));
+                LineTo(dc, cx + SC(5), cy - SC(3));
+                MoveToEx(dc, cx - SC(5), cy + SC(2), NULL);
+                LineTo(dc, cx, cy + SC(6));
+                LineTo(dc, cx + SC(5), cy + SC(2));
+            }
+            SelectObject(dc, top);
+            DeleteObject(tp);
+        }
     }
 
     if (!g_root) {
@@ -374,6 +429,317 @@ BOOL TreePtIn(POINT pt)
     return pt.x >= 0 && pt.x < TreeWidth() && pt.y >= 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* VSCode-style tree tools: header buttons (new file / new folder /   */
+/* collapse all), context menu, and an inline rename/create editor.   */
+/* ------------------------------------------------------------------ */
+
+static HWND   g_teWnd;               /* inline EDIT while active */
+static WNDPROC g_teProc;
+static int    g_teMode;              /* 1 new file 2 new dir 3 rename */
+static TreeNode *g_teDir;            /* target dir (create) */
+static TreeNode *g_teNode;           /* target node (rename) */
+static wchar_t g_teOld[MAX_PATH];    /* rename: previous path */
+static int    g_toolHover = -1;      /* 0 new file 1 new dir 2 collapse */
+
+/* rect of header tool button i (0 file, 1 folder, 2 collapse) */
+static void TreeToolRect(RECT *r, int i, const RECT *rcTree)
+{
+    int sz = SC(22);
+    r->right = rcTree->right - SC(8) - (2 - i) * (sz + SC(6));
+    r->left = r->right - sz;
+    r->top = rcTree->top + (TreeHeaderH() - sz) / 2;
+    r->bottom = r->top + sz;
+}
+
+static int TreeToolHit(POINT pt, const RECT *rcClient)
+{
+    if (!TreePtIn(pt)) return -1;
+    RECT rcTree;
+    TreeViewRect(&rcTree, rcClient);
+    if (pt.y < rcTree.top || pt.y > rcTree.top + TreeHeaderH()) return -1;
+    for (int i = 0; i < 3; i++) {
+        RECT r;
+        TreeToolRect(&r, i, &rcTree);
+        if (PtInRect(&r, pt)) return i;
+    }
+    return -1;
+}
+
+void TreeToolHover(POINT pt)
+{
+    RECT rcClient;
+    GetClientRect(g_hwnd, &rcClient);
+    int h = g_teWnd ? -1 : TreeToolHit(pt, &rcClient);
+    if (h != g_toolHover) {
+        g_toolHover = h;
+        InvalidateRect(g_hwnd, NULL, FALSE);
+    }
+}
+
+static void CollapseAll(TreeNode *n)
+{
+    for (; n; n = n->next) {
+        if (n->isDir) {
+            n->expanded = FALSE;
+            CollapseAll(n->child);
+        }
+    }
+}
+
+static void TreeCollapseAll(void)
+{
+    if (!g_root) return;
+    g_root->expanded = TRUE;      /* keep the root level visible */
+    CollapseAll(g_root->child);
+    g_scroll = 0;
+    Flatten();
+    InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void CopyClip(const wchar_t *text)
+{
+    if (!OpenClipboard(g_hwnd)) return;
+    EmptyClipboard();
+    int bytes = (lstrlenW(text) + 1) * sizeof(wchar_t);
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (g) {
+        void *p = GlobalLock(g);
+        if (p) {
+            memcpy(p, text, bytes);
+            GlobalUnlock(g);
+            SetClipboardData(CF_UNICODETEXT, g);
+        } else {
+            GlobalFree(g);
+        }
+    }
+    CloseClipboard();
+}
+
+/* refresh one directory node (re-enumerate children) */
+static void ReEnumDir(TreeNode *dir)
+{
+    if (!dir) return;
+    FreeNodes(dir->child);
+    dir->child = NULL;
+    dir->loaded = FALSE;
+    EnumChildren(dir, NULL);
+}
+
+static void TreeEditCommit(void);
+static void TreeEditCancel(void);
+static LRESULT CALLBACK TeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+
+/* place the inline editor at a row (rowIdx is a flattened index) */
+static void TreeEditShow(int rowIdx, int depth, const wchar_t *initial)
+{
+    RECT rcClient, rcTree;
+    GetClientRect(g_hwnd, &rcClient);
+    TreeViewRect(&rcTree, &rcClient);
+    if (rowIdx < g_scroll) g_scroll = rowIdx;
+    int x = rcTree.left + SC(10) + depth * SC(14);
+    int y = rcTree.top + TreeHeaderH() + (rowIdx - g_scroll) * TreeRowH();
+    RECT er = { x, y + SC(2), rcTree.right - SC(10), y + TreeRowH() - SC(2) };
+    g_teWnd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", initial,
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        er.left, er.top, er.right - er.left, er.bottom - er.top,
+        g_hwnd, (HMENU)0x7E01, NULL, NULL);
+    if (!g_teWnd) return;
+    g_teProc = (WNDPROC)SetWindowLongPtrW(g_teWnd, GWLP_WNDPROC,
+                                          (LONG_PTR)TeProc);
+    SendMessageW(g_teWnd, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+    SendMessageW(g_teWnd, EM_SETSEL, 0, -1);
+    SetFocus(g_teWnd);
+}
+
+static LRESULT CALLBACK TeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) { TreeEditCommit(); return 0; }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { TreeEditCancel();  return 0; }
+    if (msg == WM_KILLFOCUS) { TreeEditCommit(); return 0; }
+    if (msg == WM_CHAR && wp == L'\r') return 0;   /* Enter handled above */
+    return CallWindowProcW(g_teProc, h, msg, wp, lp);
+}
+
+/* begin creating a file / folder inside `dir` */
+static void TreeBeginCreate(TreeNode *dir, int mode)
+{
+    if (g_teWnd) TreeEditCommit();
+    if (!dir || !dir->isDir) return;
+    if (!dir->expanded) {
+        dir->expanded = TRUE;
+        EnumChildren(dir, NULL);
+    }
+    ReEnumDir(dir);
+    Flatten();
+    int rowIdx = 0;
+    for (int i = 0; i < g_visN; i++)
+        if (g_vis[i] == dir) { rowIdx = i + 1; break; }
+    g_teMode = mode;
+    g_teDir = dir;
+    g_teNode = NULL;
+    g_teOld[0] = 0;
+    TreeEditShow(rowIdx, dir->depth + 1,
+                 mode == 1 ? L"新建笔记.md" : L"新建文件夹");
+}
+
+static void TreeBeginRename(TreeNode *n)
+{
+    if (!n || n == g_root) return;
+    if (g_teWnd) TreeEditCommit();
+    Flatten();
+    int rowIdx = 0;
+    for (int i = 0; i < g_visN; i++)
+        if (g_vis[i] == n) { rowIdx = i; break; }
+    g_teMode = 3;
+    g_teDir = NULL;
+    g_teNode = n;
+    lstrcpynW(g_teOld, n->path, MAX_PATH);
+    TreeEditShow(rowIdx, n->depth, n->name);
+}
+
+static void TreeEditCancel(void)
+{
+    if (!g_teWnd) return;
+    DestroyWindow(g_teWnd);
+    g_teWnd = NULL;
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    SetFocus(g_edit);
+}
+
+static void TreeEditCommit(void)
+{
+    if (!g_teWnd) return;
+    wchar_t name[MAX_PATH];
+    GetWindowTextW(g_teWnd, name, MAX_PATH);
+    /* strip surrounding spaces */
+    wchar_t *a = name, *b = name + lstrlenW(name);
+    while (*a == L' ') a++;
+    while (b > a && b[-1] == L' ') b--;
+    *b = 0;
+    HWND te = g_teWnd;
+    g_teWnd = NULL;          /* prevent KILLFOCUS re-entry */
+    DestroyWindow(te);
+
+    if (name[0] && name[0] != L'.' && wcschr(name, L'\\') == NULL
+        && wcschr(name, L'/') == NULL) {
+        if (g_teMode == 1 || g_teMode == 2) {
+            wchar_t path[MAX_PATH];
+            wsprintfW(path, L"%s\\%s", g_teDir->path, name);
+            if (g_teMode == 1) {
+                HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL,
+                                       CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                                       NULL);
+                if (f != INVALID_HANDLE_VALUE) {
+                    CloseHandle(f);
+                    ReEnumDir(g_teDir);
+                    Flatten();
+                    InvalidateRect(g_hwnd, NULL, FALSE);
+                    if (ConfirmDiscard()) LoadFile(path);
+                }
+            } else {
+                if (CreateDirectoryW(path, NULL)) {
+                    ReEnumDir(g_teDir);
+                    Flatten();
+                    InvalidateRect(g_hwnd, NULL, FALSE);
+                }
+            }
+        } else if (g_teMode == 3 && g_teNode) {
+            wchar_t newPath[MAX_PATH];
+            wsprintfW(newPath, L"%s\\%s", g_teOld, name);
+            wchar_t *slash = wcsrchr(newPath, L'\\');
+            if (slash) lstrcpyW(slash + 1, name);
+            if (MoveFileW(g_teOld, newPath)) {
+                if (g_path[0] && lstrcmpiW(g_path, g_teOld) == 0)
+                    lstrcpynW(g_path, newPath, MAX_PATH);
+                TreeNode *parent = g_teNode->parent;
+                if (parent) ReEnumDir(parent);
+                Flatten();
+                InvalidateRect(g_hwnd, NULL, FALSE);
+            }
+        }
+    }
+    g_teDir = NULL;
+    g_teNode = NULL;
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    SetFocus(g_edit);
+}
+
+BOOL TreeContextMenu(LPARAM lp)
+{
+    if (!g_shown) return FALSE;
+    if (g_teWnd) TreeEditCommit();
+    POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+    POINT client = pt;
+    ScreenToClient(g_hwnd, &client);
+    if (!TreePtIn(client)) return FALSE;
+    RECT rcClient;
+    GetClientRect(g_hwnd, &rcClient);
+    int row = RowAt(client, &rcClient);
+    if (row < 0 || row >= g_visN) return TRUE;   /* header: consume */
+    TreeNode *n = g_vis[row];
+    if (!n) return TRUE;
+
+    HMENU pm = CreatePopupMenu();
+    enum { C_OPEN = 1, C_RENAME, C_COPYPATH, C_COPYNAME, C_DELETE,
+           C_NEWFILE, C_NEWDIR };
+    if (n->isDir) {
+        AppendMenuW(pm, MF_STRING, C_NEWFILE, L"新建文件");
+        AppendMenuW(pm, MF_STRING, C_NEWDIR,  L"新建文件夹");
+        AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(pm, MF_STRING, C_RENAME,   L"重命名");
+        AppendMenuW(pm, MF_STRING, C_COPYPATH, L"复制文件夹路径");
+        AppendMenuW(pm, MF_STRING, C_COPYNAME, L"复制文件夹名");
+    } else {
+        AppendMenuW(pm, MF_STRING, C_OPEN,     L"打开");
+        AppendMenuW(pm, MF_STRING, C_RENAME,   L"重命名");
+        AppendMenuW(pm, MF_STRING, C_COPYPATH, L"复制文件地址");
+        AppendMenuW(pm, MF_STRING, C_COPYNAME, L"复制文件名");
+    }
+    AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(pm, MF_STRING, C_DELETE, n->isDir ? L"删除文件夹"
+                                                  : L"删除文件");
+    SetForegroundWindow(g_hwnd);
+    int cmd = TrackPopupMenu(pm, TPM_RIGHTBUTTON | TPM_RETURNCMD
+                                  | TPM_NONOTIFY,
+                             pt.x, pt.y, 0, g_hwnd, NULL);
+    DestroyMenu(pm);
+    if (cmd == C_OPEN) {
+        if (ConfirmDiscard()) LoadFile(n->path);
+    } else if (cmd == C_NEWFILE) {
+        TreeBeginCreate(n, 1);
+    } else if (cmd == C_NEWDIR) {
+        TreeBeginCreate(n, 2);
+    } else if (cmd == C_RENAME) {
+        TreeBeginRename(n);
+    } else if (cmd == C_COPYPATH) {
+        CopyClip(n->path);
+    } else if (cmd == C_COPYNAME) {
+        CopyClip(n->name);
+    } else if (cmd == C_DELETE) {
+        wchar_t msg[MAX_PATH + 96];
+        wsprintfW(msg, L"确定删除「%s」到回收站吗？", n->name);
+        if (MessageBoxW(g_hwnd, msg, APP_NAME,
+                        MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            wchar_t buf[MAX_PATH + 2];
+            lstrcpynW(buf, n->path, MAX_PATH);
+            buf[lstrlenW(buf) + 1] = 0;      /* double-NUL terminate */
+            SHFILEOPSTRUCTW op;
+            ZeroMemory(&op, sizeof(op));
+            op.hwnd = g_hwnd;
+            op.wFunc = FO_DELETE;
+            op.pFrom = buf;
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION;
+            if (SHFileOperationW(&op) == 0 && n->parent) {
+                ReEnumDir(n->parent);
+                Flatten();
+                InvalidateRect(g_hwnd, NULL, FALSE);
+            }
+        }
+    }
+    return TRUE;
+}
+
 static int RowAt(POINT pt, const RECT *rcClient)
 {
     RECT rc;
@@ -388,8 +754,24 @@ static int RowAt(POINT pt, const RECT *rcClient)
 BOOL TreeClick(POINT pt)
 {
     if (!TreePtIn(pt)) return FALSE;
+    if (g_teWnd) TreeEditCommit();
     RECT rcClient;
     GetClientRect(g_hwnd, &rcClient);
+    int tool = TreeToolHit(pt, &rcClient);
+    if (tool == 0) {                    /* new file in workspace root */
+        Flatten();
+        TreeBeginCreate(g_root, 1);
+        return TRUE;
+    }
+    if (tool == 1) {                    /* new folder in workspace root */
+        Flatten();
+        TreeBeginCreate(g_root, 2);
+        return TRUE;
+    }
+    if (tool == 2) {
+        TreeCollapseAll();
+        return TRUE;
+    }
     int row = RowAt(pt, &rcClient);
     if (row < 0 || row >= g_visN) return TRUE;   /* header/blank: consume */
     TreeNode *n = g_vis[row];
@@ -409,6 +791,7 @@ BOOL TreeClick(POINT pt)
 void TreeMouseMove(POINT pt)
 {
     if (!g_shown) return;
+    TreeToolHover(pt);
     RECT rcClient;
     GetClientRect(g_hwnd, &rcClient);
     int row = RowAt(pt, &rcClient);

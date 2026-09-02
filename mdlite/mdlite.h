@@ -43,6 +43,7 @@
 #define IDM_TREEBAR    1024
 #define IDM_LINKS      1025
 #define IDM_GRAPH      1026
+#define IDM_HISTORY    1027
 #define IDM_MRU_BASE   2000   /* + index, up to 2009 */
 
 /* view states */

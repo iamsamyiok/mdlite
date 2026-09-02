@@ -16,6 +16,7 @@ BOOL TreeClick(POINT pt);              /* TRUE when the click is consumed */
 void TreeMouseMove(POINT pt);
 void TreeWheel(int delta);
 BOOL TreePtIn(POINT pt);
+BOOL TreeContextMenu(LPARAM lp);       /* screen coords; TRUE = consumed */
 
 /* call cb(path, ctx) for every leaf .md file in the workspace tree */
 void TreeForEachFile(void (*cb)(const wchar_t *path, void *ctx), void *ctx);

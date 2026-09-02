@@ -1617,19 +1617,20 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                     int n = (int)SendMessageW(h, EM_GETLINE, li,
                                               (LPARAM)buf);
                     if (n > 0) buf[n] = 0; else buf[0] = 0;
-                    if (buf[0] == L'/' && buf[1] == L'/') {
-                        /* agent command */
-                        if (!buf[2]) return 0;
+                    if (buf[0] == L'/' && buf[1] == L'/' && buf[2] == L'/') {
+                        /* agent command: ///task */
+                        if (!buf[3]) return 0;
                         if (g_agBusy) {
                             MessageBoxW(g_hwnd,
                                 L"Agent 任务进行中，按 Esc 可取消。",
                                 APP_NAME, MB_ICONINFORMATION);
                             return 0;
                         }
-                        StartAgent(buf + 2);
+                        StartAgent(buf + 3);
                         return 0;
                     }
-                    if (buf[0] == L'/') {
+                    if (buf[0] == L'/' && buf[1] == L'/') {
+                        /* AI question: //question */
                         if (!g_aiBase[0] || !g_aiModel[0]) {
                             MessageBoxW(g_hwnd,
                                 L"未配置 AI：请先在「配置」中填写"
@@ -1637,14 +1638,14 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                                 APP_NAME, MB_ICONINFORMATION);
                             return 0;
                         }
-                        if (!buf[1]) return 0;
+                        if (!buf[2]) return 0;
                         if (g_aiBusy) {
                             MessageBoxW(g_hwnd,
                                 L"AI 任务进行中，按 Esc 可取消。",
                                 APP_NAME, MB_ICONINFORMATION);
                             return 0;
                         }
-                        StartAi(buf + 1);
+                        StartAi(buf + 2);
                         return 0; /* we manage the newline ourselves */
                     }
                 }
