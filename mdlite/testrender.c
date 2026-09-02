@@ -1,6 +1,8 @@
 /* render md_paint into a DIB and inspect pixels */
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "markdown.h"
 
 BOOL ReadAllBytes(const wchar_t *path, char **buf, int *len)
@@ -146,6 +148,52 @@ int main(void)
     DeleteDC(mem);
     DeleteObject(dib);
     md_free(&doc);
+
+    /* ---- GitHub-style alert callout ---- */
+    const wchar_t *mdA =
+        L"> [!NOTE] 标题行\n> 正文内容\n\n普通段落\n";
+    ZeroMemory(&doc, sizeof(doc));
+    md_build(&doc, mdA, lstrlenW(mdA), &f, sdc, W);
+    expect(doc.nlines >= 3
+           && doc.lines[0].type == LT_QUOTE && doc.lines[0].alert == 1
+           && doc.lines[1].type == LT_QUOTE && doc.lines[1].alert == 6,
+           "callout: tag + body lines parsed");
+    bits = NULL;
+    dib = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+    mem = CreateCompatibleDC(0);
+    SelectObject(mem, dib);
+    md_paint(&doc, mem, &rc, 0, &f, NULL);
+    /* NOTE background #ddf4ff must be painted as a card */
+    int noteBg = count_color(bits, 24, 0, W - 24, doc.height,
+                             RGB(0xDD, 0xF4, 0xFF));
+    expect(noteBg > 300, "callout: NOTE card background painted");
+    /* left accent bar #0969da */
+    int noteBar = count_color(bits, 20, 0, 40, doc.height,
+                              RGB(0x09, 0x69, 0xDA));
+    expect(noteBar > 5, "callout: accent bar painted");
+    DeleteDC(mem);
+    DeleteObject(dib);
+    md_free(&doc);
+
+    /* HTML export must emit the alert div for all five types */
+    {
+        const wchar_t *mdH =
+            L"> [!NOTE] a\n> [!TIP] b\n> [!IMPORTANT] c\n"
+            L"> [!WARNING] d\n> [!CAUTION] e\n";
+        char *html = NULL;
+        int hn = md_to_html(mdH, lstrlenW(mdH), &html);
+        int ok = hn > 0 && html != NULL;
+        if (ok) {
+            int divs = 0;
+            for (char *p = html; (p = strstr(p, "<div class=\"alert"));
+                 p++) divs++;
+            ok = divs == 5 && strstr(html, "</div>") != NULL
+                 && strstr(html, "t2") != NULL
+                 && strstr(html, "t5") != NULL;
+        }
+        expect(ok, "html: five alert cards exported");
+        free(html);
+    }
 
     /* ---- image rendering (requires i.png) ---- */
     const wchar_t *md3 = L"![x](i.png)\n";

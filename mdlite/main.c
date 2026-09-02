@@ -497,6 +497,10 @@ static void ShowHelp(void)
         L"  Enter 查找下一个 · Shift+Enter 上一个\r\n"
         L"  替换框 Enter 替换当前 · Ctrl+Enter 全部替换 · Esc 关闭。\r\n"
          L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
+         L"斜杠命令：输入 / 弹出块命令菜单（问 AI、Agent、标题、列表、\r\n"
+         L"  代码块、表格、提示框、帽头、日期等）；输入过滤，↑↓ 选择、\r\n"
+         L"  Enter/Tab 应用、Esc 关闭；过滤无匹配时菜单自动消失，\r\n"
+         L"  行首 /问题 + Enter 仍是 AI 问答、//命令 + Enter 仍是 Agent。\r\n"
          L"文件树：Ctrl+B 切换左侧工作区文件列表；Enter 打开，双击目录展开/折叠，Esc 关闭。\r\n"
          L"链接：Ctrl+Shift+L 弹出反向链接与孤儿笔记面板；双击条目跳转，Esc 关闭；保存后自动刷新。\r\n"
          L"知识图谱：Ctrl+G 进入/退出全库链接图；滚轮缩放、拖拽节点、双击跳转，ESC 返回。\r\n"
@@ -2873,6 +2877,265 @@ void WikiCompleteKey(HWND edit, UINT vk, BOOL *eaten)
         *eaten = 1;
     } else if (vk == VK_ESCAPE) {
         HideWikiMenu();
+        *eaten = 1;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Slash command menu - Notion-style block commands. The '/' stays in */
+/* the editor and acts as the filter word; arrows / Enter / Tab / Esc */
+/* work like the wiki menu. An unmatched filter auto-hides the popup  */
+/* so line-leading "/question" + Enter keeps working as the AI prompt */
+/* and "//cmd" keeps working as the agent prompt.                      */
+/* ------------------------------------------------------------------ */
+
+enum { SL_TEXT = 0, SL_FRONTMATTER = 11, SL_DATE = 13,
+       SL_ASK = 14, SL_AGENT = 15 };
+
+typedef struct {
+    const wchar_t *label;
+    const wchar_t *before, *sel, *after;  /* used when id == SL_TEXT */
+    int id;
+} SlItem;
+
+static const SlItem SLASH_ITEMS[] = {
+    { L"问 AI",    NULL, NULL, NULL, SL_ASK },
+    { L"Agent",    NULL, NULL, NULL, SL_AGENT },
+    { L"一级标题", L"\r\n# ",  L"标题", L"", 0 },
+    { L"二级标题", L"\r\n## ", L"标题", L"", 0 },
+    { L"三级标题", L"\r\n### ", L"标题", L"", 0 },
+    { L"任务列表", L"\r\n- [ ] ", L"任务", L"", 0 },
+    { L"无序列表", L"\r\n", L"- 列表项", L"", 0 },
+    { L"有序列表", L"\r\n", L"1. 列表项", L"", 0 },
+    { L"代码块",   L"\r\n```\r\n", L"代码", L"\r\n```", 0 },
+    { L"表格",     L"\r\n| 列一 | 列二 |\r\n| --- | --- |\r\n"
+                   L"| 内容 | 内容 |", L"", L"", 0 },
+    { L"引用块",   L"\r\n", L"> 引用内容", L"", 0 },
+    { L"提示框",   L"\r\n> [!NOTE] ", L"标题", L"\r\n> 正文", 0 },
+    { L"帽头",     NULL, NULL, NULL, SL_FRONTMATTER },
+    { L"分隔线",   L"\r\n---\r\n", L"", L"", 0 },
+    { L"今日日期", NULL, NULL, NULL, SL_DATE },
+};
+#define SL_N (int)(sizeof(SLASH_ITEMS) / sizeof(SLASH_ITEMS[0]))
+
+static HWND g_slWnd, g_slList;
+static int  g_slVis[SL_N];
+static int  g_slVisN;
+static int  g_slAnchor;        /* abs pos just after the '/' */
+
+void HideSlashMenu(void)
+{
+    if (g_slWnd) DestroyWindow(g_slWnd);
+    g_slWnd = NULL;
+    g_slList = NULL;
+}
+
+BOOL SlashMenuActive(void)
+{
+    return g_slWnd != NULL;
+}
+
+static void SlFill(const wchar_t *filter, int flen)
+{
+    wchar_t low[40];
+    if (flen > 38) flen = 38;
+    for (int i = 0; i < flen; i++) low[i] = lowerW(filter[i]);
+    low[flen] = 0;
+
+    SendMessageW(g_slList, LB_RESETCONTENT, 0, 0);
+    g_slVisN = 0;
+    for (int i = 0; i < SL_N; i++) {
+        BOOL ok = (flen == 0);
+        if (!ok) {
+            const wchar_t *lbl = SLASH_ITEMS[i].label;
+            int ll = lstrlenW(lbl);
+            for (int s = 0; s <= ll - flen && !ok; s++) {
+                int k = 0;
+                while (k < flen && lowerW(lbl[s + k]) == low[k]) k++;
+                if (k == flen) ok = TRUE;
+            }
+        }
+        if (ok) {
+            SendMessageW(g_slList, LB_ADDSTRING, 0,
+                         (LPARAM)SLASH_ITEMS[i].label);
+            g_slVis[g_slVisN++] = i;
+        }
+    }
+    if (g_slVisN > 0) SendMessageW(g_slList, LB_SETCURSEL, 0, 0);
+}
+
+/* replace "/filter" at the caret with the chosen command */
+static void SlApply(void)
+{
+    int sel = (int)SendMessageW(g_slList, LB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= g_slVisN) return;
+    const SlItem *it = &SLASH_ITEMS[g_slVis[sel]];
+
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    int start = g_slAnchor;
+    if (start < 0 || (DWORD)start > s0) { HideSlashMenu(); return; }
+
+    wchar_t buf[600];
+    int  n = 0, lead = 0;
+    int  selAt = -1, selLen = 0;   /* range to select after insert */
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    if (it->id == SL_DATE) {
+        n = wsprintfW(buf, L"%04d-%02d-%02d",
+                      st.wYear, st.wMonth, st.wDay);
+    } else if (it->id == SL_FRONTMATTER) {
+        n = wsprintfW(buf,
+            L"---\r\ntitle: 标题\r\ntags: []\r\ndate: "
+            L"%04d-%02d-%02d\r\n---\r\n",
+            st.wYear, st.wMonth, st.wDay);
+        selAt = 12; selLen = 2;    /* select the 标题 placeholder */
+    } else if (it->id == SL_ASK || it->id == SL_AGENT) {
+        /* put the '/' or '//' at the start of the current line so the
+         * existing Enter-to-ask flow picks it up */
+        int li = (int)SendMessageW(g_edit, EM_LINEFROMCHAR, s0, 0);
+        int ls = (int)SendMessageW(g_edit, EM_LINEINDEX, li, 0);
+        HideSlashMenu();
+        int pfx = (it->id == SL_AGENT) ? 2 : 1;
+        SendMessageW(g_edit, EM_SETSEL, ls, ls);
+        if (pfx == 2) SendMessageW(g_edit, EM_REPLACESEL,
+                                   TRUE, (LPARAM)L"//");
+        else          SendMessageW(g_edit, EM_REPLACESEL,
+                                   TRUE, (LPARAM)L"/");
+        SendMessageW(g_edit, EM_SETSEL, ls + pfx, ls + pfx);
+        SendMessageW(g_edit, EM_SCROLLCARET, 0, 0);
+        SetFocus(g_edit);
+        return;
+    } else {
+        /* plain text snippet - same semantics as the @ insert menu */
+        const wchar_t *parts[3] = { it->before, it->sel, it->after };
+        for (int p = 0; p < 3; p++)
+            for (const wchar_t *q = parts[p]; *q && n < 590; q++)
+                buf[n++] = *q;
+        buf[n] = 0;
+        /* block snippets start with CRLF; drop it at line start */
+        if (buf[0] == L'\r') {
+            int li = (int)SendMessageW(g_edit,
+                                       EM_LINEFROMCHAR, s0, 0);
+            if ((int)SendMessageW(g_edit, EM_LINEINDEX, li, 0)
+                    == (int)s0) {
+                memmove(buf, buf + 2, (n - 1) * sizeof(wchar_t));
+                n -= 2;
+                lead = 2;
+            }
+        }
+        selAt = lstrlenW(it->before) - lead;
+        selLen = lstrlenW(it->sel);
+    }
+
+    HideSlashMenu();
+    /* replace from the '/' through the caret with the snippet */
+    SendMessageW(g_edit, EM_SETSEL, start - 1, s0);
+    SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)buf);
+    int base = start - 1;
+    if (selAt >= 0)
+        SendMessageW(g_edit, EM_SETSEL, base + selAt,
+                     base + selAt + selLen);
+    else
+        SendMessageW(g_edit, EM_SETSEL, base + n, base + n);
+    SendMessageW(g_edit, EM_SCROLLCARET, 0, 0);
+    SetFocus(g_edit);
+}
+
+static void ShowSlashMenu(void)
+{
+    if (g_slWnd) return;
+    g_slWnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        L"STATIC", NULL, WS_POPUP,
+        0, 0, SC(240), SC(200), g_hwnd, NULL, NULL, NULL);
+    if (!g_slWnd) return;
+    g_slList = CreateWindowExW(0, L"LISTBOX", NULL,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY
+        | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
+        0, 0, SC(240), SC(200), g_slWnd, (HMENU)4, NULL, NULL);
+    SendMessageW(g_slList, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+}
+
+static void SlPosition(void)
+{
+    if (!g_slWnd) return;
+    POINT pt = { 0, 0 };
+    GetCaretPos(&pt);
+    ClientToScreen(g_edit, &pt);
+    ScreenToClient(g_hwnd, &pt);
+    RECT rcBody;
+    GetBodyRect(&rcBody);
+    int x = rcBody.left + pt.x;
+    int y = rcBody.top + pt.y + SC(20);
+    int w = SC(240), hh = SC(200);
+    RECT rcWnd;
+    GetWindowRect(g_hwnd, &rcWnd);
+    if (x + w > rcBody.right) x = rcBody.right - w;
+    if (x < rcBody.left) x = rcBody.left;
+    if (y + hh > rcBody.bottom) y = rcBody.top + pt.y - SC(20) - hh;
+    if (y < rcBody.top) y = rcBody.top;
+    SetWindowPos(g_slWnd, HWND_TOPMOST, x, y, w, hh,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void SlashCompleteCheck(HWND edit)
+{
+    (void)edit;
+    if (g_view != VIEW_EDIT && g_view != VIEW_SPLIT) {
+        HideSlashMenu();
+        return;
+    }
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    if (s0 != e0) { HideSlashMenu(); return; }
+    int li = (int)SendMessageW(g_edit, EM_LINEFROMCHAR, s0, 0);
+    int ls = (int)SendMessageW(g_edit, EM_LINEINDEX, li, 0);
+    int off = (int)s0 - ls;
+    wchar_t buf[1024];
+    *(LPWORD)buf = (WORD)(sizeof(buf) / sizeof(wchar_t) - 1);
+    int got = (int)SendMessageW(g_edit, EM_GETLINE, li, (LPARAM)buf);
+    if (got > 0) buf[got] = 0; else buf[0] = 0;
+    /* find the nearest '/' before the caret on this line */
+    int i = off;
+    while (i > 0 && buf[i-1] != L'/' && buf[i-1] != L' '
+           && buf[i-1] != L'\t')
+        i--;
+    if (i == 0 || buf[i-1] != L'/') { HideSlashMenu(); return; }
+    int slash = i - 1;
+    /* "//cmd" belongs to the agent and "http:/" to URLs */
+    if (slash > 0 && (buf[slash-1] == L'/' || buf[slash-1] == L':')) {
+        HideSlashMenu();
+        return;
+    }
+    int flen = off - slash - 1;
+    if (flen > 38) { HideSlashMenu(); return; }
+
+    if (!g_slWnd) ShowSlashMenu();
+    if (!g_slWnd) return;
+    g_slAnchor = ls + slash + 1;
+    SlFill(buf + slash + 1, flen);
+    if (g_slVisN == 0) { HideSlashMenu(); return; }
+    SlPosition();
+}
+
+void SlashCompleteKey(HWND edit, UINT vk, BOOL *eaten)
+{
+    (void)edit;
+    *eaten = 0;
+    if (!g_slWnd) return;
+    if (vk == VK_DOWN || vk == VK_UP) {
+        int cur = (int)SendMessageW(g_slList, LB_GETCURSEL, 0, 0);
+        if (cur < 0) cur = 0;
+        if (vk == VK_DOWN && cur + 1 < g_slVisN) cur++;
+        if (vk == VK_UP && cur > 0) cur--;
+        SendMessageW(g_slList, LB_SETCURSEL, cur, 0);
+        *eaten = 1;
+    } else if (vk == VK_RETURN || vk == VK_TAB) {
+        SlApply();
+        *eaten = 1;
+    } else if (vk == VK_ESCAPE) {
+        HideSlashMenu();
         *eaten = 1;
     }
 }

@@ -42,10 +42,17 @@ make test     # wine 跑 test.exe + testrender.exe
   并跳转，找不到时提供创建笔记的选项
 - 双链自动补全：输入 `[[` 自动弹出工作区笔记列表（焦点留在编辑器），
   继续输入即过滤，↑↓ 选择、Enter/Tab 补全、Esc 关闭
+- 斜杠命令（Notion 风格）：输入 `/` 弹出块命令菜单——问 AI、Agent、
+  一二三级标题、任务/无序/有序列表、代码块、表格、引用块、提示框
+  （Callout）、帽头（frontmatter）、分隔线、今日日期；输入即过滤，
+  ↑↓ 选择、Enter/Tab 应用；过滤无匹配自动收起，行首 `/问题` + Enter
+  的 AI 问答与 `//命令` + Enter 的 Agent 用法保持不变
 - 插入菜单：编辑器按 `@` 弹出 Markdown 片段菜单（标题/表格/代码块/任务列表等），
   输入过滤、Enter 插入、Esc 关闭
 - 括号配对：输入 `[` `(` `{` 自动补全配对并包裹选区；输入 `]` `)` `}`
   跳出配对；退格删除整对
+- 提示框 Callout：`> [!NOTE]`、`[!TIP]`、`[!IMPORTANT]`、`[!WARNING]`、
+  `[!CAUTION]`（GitHub alerts 语法）在预览与导出 HTML 中渲染为彩色卡片
 - 知识图谱：`Ctrl+G` 进入/退出全库链接关系图（支持 `[[wiki]]` 和 `[text](target)` 两种语法，
   全盘扫描不依赖文件树展开状态）；力导向布局、滚轮缩放、拖拽节点、双击跳转；
   节点右上角显示连接数 badge；保存文档后自动重建
@@ -70,6 +77,9 @@ make test     # wine 跑 test.exe + testrender.exe
 | Ctrl+/ | 切换 编辑 / 分栏 / 预览 |
 | Ctrl+F / Ctrl+H / Ctrl+P | 查找 / 查找替换 / 文档大纲 |
 | Ctrl+B | 切换左侧文件树 |
+| `@` | 插入 Markdown 片段菜单 |
+| `/` | 斜杠命令菜单（块命令 + 问 AI / Agent） |
+| `[[` | 双链笔记名自动补全 |
 | Ctrl+Shift+L | 反向链接与孤儿笔记面板 |
 | Ctrl+G | 进入 / 退出知识图谱 |
 | Ctrl+D / Ctrl+L | 复制当前行 / 选整行 |

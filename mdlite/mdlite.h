@@ -106,6 +106,11 @@ void  WikiCompleteCheck(HWND edit);        /* re-evaluate caret ctx */
 void  WikiCompleteKey(HWND edit, UINT vk, BOOL *eaten); /* arrows/enter/esc */
 void  HideWikiMenu(void);
 BOOL  WikiMenuActive(void);
+/* slash command menu (main.c); same pattern as the wiki popup */
+void  SlashCompleteCheck(HWND edit);       /* re-evaluate caret ctx */
+void  SlashCompleteKey(HWND edit, UINT vk, BOOL *eaten);
+void  HideSlashMenu(void);
+BOOL  SlashMenuActive(void);
 void  AiCancel(void);
 void  AgCancel(void);
 void  AiFlushPending(void);

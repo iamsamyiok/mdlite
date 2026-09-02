@@ -1475,7 +1475,8 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 SendMessageW(h, EM_SETSEL, s0 - 1, s0 + 1);
                 SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)L"");
                 SendMessageW(h, EM_SETSEL, s0 - 1, s0 - 1);
-                WikiCompleteCheck(h);   /* leaving "[[" closes popup */
+                WikiCompleteCheck(h);
+                SlashCompleteCheck(h);
                 return 0;
             }
         }
@@ -1488,14 +1489,26 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (eaten) return 0;
     }
 
+    /* slash commands: same keyboard flow, wins only when its popup
+     * is the live one (they never coexist) */
+    if (msg == WM_KEYDOWN && SlashMenuActive()) {
+        BOOL eaten = 0;
+        SlashCompleteKey(h, (UINT)wp, &eaten);
+        if (eaten) return 0;
+    }
+
     /* any caret move outside a "[[" context closes the popup */
     if (msg == WM_KEYDOWN && (wp == VK_LEFT || wp == VK_RIGHT
                               || wp == VK_HOME || wp == VK_END)) {
         LRESULT r = CallWindowProcW(g_editProc, h, msg, wp, lp);
         WikiCompleteCheck(h);
+        SlashCompleteCheck(h);
         return r;
     }
-    if (msg == WM_KILLFOCUS) HideWikiMenu();
+    if (msg == WM_KILLFOCUS) {
+        HideWikiMenu();
+        HideSlashMenu();
+    }
 
     if (msg == WM_KEYDOWN) {
         BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1675,6 +1688,7 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
                 /* typing the second '[' opens the wiki autocomplete */
                 WikiCompleteCheck(h);
+                SlashCompleteCheck(h);
                 return 0;
             }
         }
@@ -1687,7 +1701,8 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 wchar_t next = EditCharAt(h, (int)s0);
                 if (next == (wchar_t)wp) {
                     SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
-                    WikiCompleteCheck(h);   /* may close the popup */
+                    WikiCompleteCheck(h);
+                    SlashCompleteCheck(h);
                     return 0;   /* skip over the existing bracket */
                 }
             }
@@ -1753,9 +1768,10 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             && wp != VK_TAB && wp != 26)
             return 0;
         /* printable input (and backspace): let it land, then
-         * re-evaluate the [[ autocomplete context */
+         * re-evaluate the [[ and / autocomplete contexts */
         LRESULT r = CallWindowProcW(g_editProc, h, msg, wp, lp);
         WikiCompleteCheck(h);
+        SlashCompleteCheck(h);
         return r;
     }
     return CallWindowProcW(g_editProc, h, msg, wp, lp);

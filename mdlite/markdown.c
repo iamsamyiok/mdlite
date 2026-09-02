@@ -719,6 +719,7 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
     int y = 0, pos = 0;
     int pendingBlank = 0;
     int headingLevel = 0;
+    int inAlert = 0;        /* inside a "> [!TYPE]" callout card */
     int total = srcLen;
     const wchar_t *p = doc->text;
 
@@ -757,6 +758,8 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
         RunBuf rb = {0};
         int lineH = f->bodyH + (f->bodyH >> 1); /* 1.5 line spacing */
         int spaceAbove = 0, spaceBelow = 0;
+
+        if (s[0] != L'>') inAlert = 0;   /* left the callout card */
 
         if (inCode) {
             if (len >= 3 && s[0] == L'`' && s[1] == L'`' && s[2] == L'`') {
@@ -1019,6 +1022,26 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
             if (len > 0 && s[0] == L' ') { s++; len--; }
             L = push_line(doc, LT_QUOTE);
             L->depth = qlevel;
+            /* GitHub-style alert: "> [!NOTE]" opens a callout card.
+             * 1=NOTE 2=TIP 3=IMPORTANT 4=WARNING 5=CAUTION, 6=body */
+            if (qlevel == 1 && len >= 6 && s[0] == L'[' && s[1] == L'!') {
+                static const wchar_t *const anames[5] = {
+                    L"NOTE]", L"TIP]", L"IMPORTANT]", L"WARNING]",
+                    L"CAUTION]" };
+                for (int a = 0; a < 5; a++) {
+                    int al = 0;
+                    while (al < 11 && anames[a][al] && s[2 + al] == anames[a][al])
+                        al++;
+                    if (anames[a][al] == 0) {
+                        L->alert = (char)(a + 1);
+                        s += 2 + al; len -= 2 + al;
+                        if (len > 0 && s[0] == L' ') { s++; len--; }
+                        inAlert = 1;
+                        goto have_line;
+                    }
+                }
+            }
+            if (inAlert && qlevel == 1) L->alert = 6;
             goto have_line;
         }
 
@@ -1055,7 +1078,8 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
     have_line:
         parse_inline(s, len, 0, 0, &rb, NULL, 0);
         wrap_line(L, &rb, f, hdc,
-                  contentW - (L->type == LT_QUOTE ? 20 : 0), lineH,
+                  contentW - (L->type == LT_QUOTE
+                              ? (L->alert ? 56 : 20) : 0), lineH,
                   headingLevel);
         headingLevel = 0;
         free_runs(&rb);
@@ -1388,6 +1412,61 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
         }
 
         case LT_QUOTE: {
+            /* GitHub-style alert card: colored bg + left bar + tag */
+            if (L->alert) {
+                int at = L->alert;
+                if (at == 6) {   /* body line: find the card's type */
+                    for (int k = i - 1; k >= 0; k--) {
+                        MDLine *Q = &doc->lines[k];
+                        if (Q->type == LT_QUOTE && Q->alert >= 1
+                            && Q->alert <= 5) { at = Q->alert; break; }
+                        if (Q->type != LT_QUOTE || Q->depth != 1) break;
+                    }
+                    if (at == 6) at = 1;
+                }
+                static const COLORREF acol[6] = {
+                    0, RGB(9,105,218), RGB(26,127,55), RGB(130,80,223),
+                    RGB(154,103,0), RGB(207,34,46) };
+                static const COLORREF abg[6] = {
+                    0, RGB(221,244,255), RGB(218,251,225),
+                    RGB(251,239,255), RGB(255,248,197), RGB(255,235,233) };
+                static const wchar_t *const atag[6] = {
+                    NULL, L"\x26A0 \x6CE8", L"\x26A0 \x63D0\x793A",
+                    L"\x26A0 \x91CD\x8981", L"\x26A0 \x8B66\x544A",
+                    L"\x26A0 \x5371\x9669" };
+                int cw = doc->width - 24;
+                RECT card = { x - 4, top, x - 4 + cw, bottom };
+                HBRUSH bg = CreateSolidBrush(abg[at]);
+                FillRect(hdc, &card, bg);
+                DeleteObject(bg);
+                RECT bar = { card.left, card.top, card.left + 4, card.bottom };
+                HBRUSH bb = CreateSolidBrush(acol[at]);
+                FillRect(hdc, &bar, bb);
+                DeleteObject(bb);
+                int tx = x + 14;
+                if (L->alert >= 1 && L->alert <= 5) {
+                    /* tag line: bold colored label, then the text runs */
+                    HFONT old = (HFONT)SelectObject(hdc, f->bold);
+                    SetTextColor(hdc, acol[at]);
+                    SetBkMode(hdc, TRANSPARENT);
+                    int tl = lstrlenW(atag[at]);
+                    SIZE tsz; GetTextExtentPoint32W(hdc, atag[at], tl, &tsz);
+                    ExtTextOutW(hdc, tx, top + L->padTop, 0, NULL,
+                                atag[at], tl, NULL);
+                    SelectObject(hdc, old);
+                    for (int k = 0; k < L->nsubs; k++) {
+                        draw_runs(hdc, &L->subs[k],
+                                  tx + tsz.cx + 10, subY, f, g_colText, 0);
+                        subY += L->subs[k].height;
+                    }
+                    break;
+                }
+                for (int k = 0; k < L->nsubs; k++) {
+                    draw_runs(hdc, &L->subs[k], tx, subY, f, g_colText, 0);
+                    subY += L->subs[k].height;
+                }
+                break;
+            }
             HPEN pen = CreatePen(PS_SOLID | PS_ENDCAP_ROUND, 3, g_colQuoteBar);
             HPEN op = (HPEN)SelectObject(hdc, pen);
             for (int q = 0; q < L->depth; q++) {
@@ -1836,6 +1915,12 @@ static void h_close_q(HtmlOut *o, int *qLv)
     while (*qLv > 0) { h_app(o, "</blockquote>\n"); (*qLv)--; }
 }
 
+/* close an open GitHub-alert callout div at block boundaries */
+static void h_close_alert(HtmlOut *o, int *inA)
+{
+    if (*inA) { h_app(o, "</div>\n"); *inA = 0; }
+}
+
 /* delimiter row validity for html export (mirrors is_delim_row) */
 static int tbl_delim_ok(const wchar_t *s, int len)
 {
@@ -1922,12 +2007,24 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
               "pre code{display:block;padding:12px;overflow-x:auto}\n"
               "blockquote{border-left:4px solid #d2d2d7;margin:0;"
               "padding:2px 16px;color:#6e6e73}\n"
+              ".alert{border-left:4px solid #0969da;background:#ddf4ff;"
+              "margin:10px 0;padding:6px 14px;border-radius:4px}\n"
+              ".alert b.tag{color:#0969da}\n"
+              ".alert.t2{border-color:#1a7f37;background:#dafbe1}"
+              ".alert.t2 b.tag{color:#1a7f37}\n"
+              ".alert.t3{border-color:#8250df;background:#fbefff}"
+              ".alert.t3 b.tag{color:#8250df}\n"
+              ".alert.t4{border-color:#9a6700;background:#fff8c5}"
+              ".alert.t4 b.tag{color:#9a6700}\n"
+              ".alert.t5{border-color:#cf222e;background:#ffebe9}"
+              ".alert.t5 b.tag{color:#cf222e}\n"
               "a{color:#007aff}\nimg{max-width:100%}\n"
               "mark{background:#fff4b5;padding:0 2px}\n"
               "hr{border:none;border-top:1px solid #d2d2d7}\n"
               "</style>\n</head>\n<body>\n");
 
     int inCode = 0, inP = 0, inUl = 0, inOl = 0, qLv = 0;
+    int inAlertH = 0;   /* inside a "> [!TYPE]" callout div */
     MDFootnote fns[64];
     int nfn = 0;
     int pos = 0;
@@ -1947,6 +2044,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
             h_close_q(&o, &qLv);
+            h_close_alert(&o, &inAlertH);
             pos += adv;
             if (pos > srcLen) break;
             continue;
@@ -1975,6 +2073,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
             h_close_q(&o, &qLv);
+            h_close_alert(&o, &inAlertH);
             h_app(&o, "<pre><code>");
             inCode = 1;
             pos += adv;
@@ -2010,6 +2109,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
                 if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
                 if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
                 h_close_q(&o, &qLv);
+                h_close_alert(&o, &inAlertH);
                 h_app(&o, "<table>\n<thead>\n<tr>\n");
                 tbl_emit_row(&o, s, sl, 1, ns2 + nlead2, nlen2 - nlead2);
                 h_app(&o, "</tr>\n</thead>\n<tbody>\n");
@@ -2046,6 +2146,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
                 if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
                 if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
                 h_close_q(&o, &qLv);
+                h_close_alert(&o, &inAlertH);
                 const char *tags[6] = { "h1", "h2", "h3", "h4", "h5", "h6" };
                 h_app(&o, "<");
                 h_app(&o, tags[lv-1]);
@@ -2084,6 +2185,52 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
+            /* GitHub alert card: "> [!TYPE]" line opens a colored div */
+            if (qlevel == 1 && ql >= 6 && qs[0] == L'[' && qs[1] == L'!') {
+                static const char *const atags[5] = {
+                    "\xE6\xB3\xA8", "\xE6\x8F\x90\xE7\xA4\xBA",
+                    "\xE9\x87\x8D\xE8\xA6\x81",
+                    "\xE8\xAD\xA6\xE5\x91\x8A",
+                    "\xE5\x8D\xB1\xE9\x99\xA9" };
+                static const wchar_t *const anames2[5] = {
+                    L"NOTE]", L"TIP]", L"IMPORTANT]", L"WARNING]",
+                    L"CAUTION]" };
+                for (int a = 0; a < 5; a++) {
+                    int al = 0;
+                    while (al < 11 && anames2[a][al]
+                           && qs[2 + al] == anames2[a][al]) al++;
+                    if (anames2[a][al] == 0) {
+                        qs += 2 + al; ql -= 2 + al;
+                        if (ql > 0 && qs[0] == L' ') { qs++; ql--; }
+                        if (a > 0) {
+                            char cls[16];
+                            wsprintfA(cls, "%d", a);
+                            h_app(&o, "<div class=\"alert t");
+                            h_app(&o, cls);
+                        } else {
+                            h_app(&o, "<div class=\"alert");
+                        }
+                        h_app(&o, "\"><p><b class=\"tag\">\xE2\x9A\xA0 ");
+                        h_app(&o, atags[a]);
+                        h_app(&o, "</b> ");
+                        if (ql > 0) h_inline(&o, qs, ql, 0);
+                        h_app(&o, "</p>\n");
+                        inAlertH = 1;
+                        goto alert_done;
+                    }
+                }
+            }
+            if (inAlertH && qlevel == 1 && qLv == 0) {
+                /* body line of an open callout card */
+                h_app(&o, "<p>");
+                h_inline(&o, qs, ql, 0);
+                h_app(&o, "</p>\n");
+            alert_done: ;
+                pos += adv;
+                if (pos > srcLen) break;
+                continue;
+            }
+            if (inAlertH) { h_app(&o, "</div>\n"); inAlertH = 0; }
             while (qLv < qlevel) { h_app(&o, "<blockquote>\n"); qLv++; }
             while (qLv > qlevel) { h_app(&o, "</blockquote>\n"); qLv--; }
             h_app(&o, "<p>");
@@ -2093,6 +2240,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (pos > srcLen) break;
             continue;
         }
+        if (inAlertH) { h_app(&o, "</div>\n"); inAlertH = 0; }
 
         if ((s[0] == L'-' || s[0] == L'*' || s[0] == L'+')
             && sl > 1 && s[1] == L' ') {
@@ -2110,6 +2258,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
             if (inP) { h_app(&o, "</p>\n"); inP = 0; }
             if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
             h_close_q(&o, &qLv);
+            h_close_alert(&o, &inAlertH);
             if (!inUl) {
                 h_app(&o, task ? "<ul class=\"task\">\n" : "<ul>\n");
                 inUl = 1;
@@ -2133,6 +2282,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
                 if (inP) { h_app(&o, "</p>\n"); inP = 0; }
                 if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
                 h_close_q(&o, &qLv);
+                h_close_alert(&o, &inAlertH);
                 if (!inOl) { h_app(&o, "<ol>\n"); inOl = 1; }
                 h_app(&o, "<li>");
                 h_inline(&o, s + d + 2, sl - d - 2, 0);
@@ -2147,6 +2297,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
         if (inUl) { h_app(&o, "</ul>\n"); inUl = 0; }
         if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
         h_close_q(&o, &qLv);
+        h_close_alert(&o, &inAlertH);
         if (!inP) { h_app(&o, "<p>"); inP = 1; }
         else h_app(&o, "<br>\n");
         h_inline(&o, s, sl, 0);
@@ -2158,6 +2309,7 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
     if (inUl) h_app(&o, "</ul>\n");
     if (inOl) h_app(&o, "</ol>\n");
     h_close_q(&o, &qLv);
+    h_close_alert(&o, &inAlertH);
     if (nfn > 0) {
         h_app(&o, "<hr>\n<section class=\"footnotes\">\n<ol>\n");
         for (int i = 0; i < nfn; i++) {
