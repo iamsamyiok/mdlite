@@ -1435,6 +1435,23 @@ static void EditMoveLine(HWND h, int dir)
     free(ins);
 }
 
+/* character at absolute caret position (works for EDIT and RichEdit);
+ * returns 0 when out of range or on a line break */
+static wchar_t EditCharAt(HWND h, int pos)
+{
+    if (pos < 0) return 0;
+    int li = (int)SendMessageW(h, EM_LINEFROMCHAR, pos, 0);
+    int ls = (int)SendMessageW(h, EM_LINEINDEX, li, 0);
+    int off = pos - ls;
+    if (off < 0) return 0;
+    wchar_t buf[1024];
+    *(LPWORD)buf = (WORD)(sizeof(buf) / sizeof(wchar_t) - 1);
+    int got = (int)SendMessageW(h, EM_GETLINE, li, (LPARAM)buf);
+    if (got > 0) buf[got] = 0; else buf[0] = 0;
+    if (off >= lstrlenW(buf)) return 0;   /* caret sits at line end */
+    return buf[off];
+}
+
 LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
@@ -1442,6 +1459,43 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                      ((short)HIWORD(wp) > 0) ? 1 : -1);
         return 0;
     }
+
+    /* Backspace between an auto-inserted pair removes both chars */
+    if (msg == WM_KEYDOWN && wp == VK_BACK
+        && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        DWORD s0 = 0, e0 = 0;
+        SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+        if (s0 == e0 && s0 > 0) {
+            wchar_t prev = EditCharAt(h, (int)s0 - 1);
+            wchar_t next = EditCharAt(h, (int)s0);
+            BOOL pair = (prev == L'[' && next == L']')
+                     || (prev == L'(' && next == L')')
+                     || (prev == L'{' && next == L'}');
+            if (pair) {
+                SendMessageW(h, EM_SETSEL, s0 - 1, s0 + 1);
+                SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)L"");
+                SendMessageW(h, EM_SETSEL, s0 - 1, s0 - 1);
+                WikiCompleteCheck(h);   /* leaving "[[" closes popup */
+                return 0;
+            }
+        }
+    }
+
+    /* [[ autocomplete: arrows / Enter / Tab / Esc drive the popup */
+    if (msg == WM_KEYDOWN && WikiMenuActive()) {
+        BOOL eaten = 0;
+        WikiCompleteKey(h, (UINT)wp, &eaten);
+        if (eaten) return 0;
+    }
+
+    /* any caret move outside a "[[" context closes the popup */
+    if (msg == WM_KEYDOWN && (wp == VK_LEFT || wp == VK_RIGHT
+                              || wp == VK_HOME || wp == VK_END)) {
+        LRESULT r = CallWindowProcW(g_editProc, h, msg, wp, lp);
+        WikiCompleteCheck(h);
+        return r;
+    }
+    if (msg == WM_KILLFOCUS) HideWikiMenu();
 
     if (msg == WM_KEYDOWN) {
         BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1591,23 +1645,50 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             ShowInsertMenu();
             return 0;
         }
-        /* auto-close brackets: [, (, {, ", ' */
-        if (wp == L'[' || wp == L'(' || wp == L'{' || wp == L'"' || wp == L'\'') {
+        /* auto-close brackets: [ ( { — Obsidian/VSCode style */
+        if (wp == L'[' || wp == L'(' || wp == L'{') {
+            DWORD s0 = 0, e0 = 0;
+            SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+            wchar_t open = (wchar_t)wp;
+            wchar_t close = (wp == L'[') ? L']'
+                          : (wp == L'(') ? L')' : L'}';
+            if (s0 != e0) {
+                /* wrap the selection: open + sel + close */
+                int len = (int)(e0 - s0);
+                wchar_t *sel = (wchar_t *)malloc(
+                    (len + 3) * sizeof(wchar_t));
+                if (sel) {
+                    SendMessageW(h, EM_GETSELTEXT, 0, (LPARAM)(sel + 1));
+                    sel[0] = open;
+                    sel[len + 1] = close;
+                    sel[len + 2] = 0;
+                    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)sel);
+                    /* keep the wrapped text selected */
+                    SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1 + len);
+                    free(sel);
+                    return 0;
+                }
+            } else {
+                /* insert the pair, caret between them */
+                wchar_t pair[3] = { open, close, 0 };
+                SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)pair);
+                SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
+                /* typing the second '[' opens the wiki autocomplete */
+                WikiCompleteCheck(h);
+                return 0;
+            }
+        }
+        /* type-over: typing a closing bracket when the next char is
+         * already that bracket just steps the caret over it */
+        if (wp == L']' || wp == L')' || wp == L'}') {
             DWORD s0 = 0, e0 = 0;
             SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
             if (s0 == e0) {
-                const wchar_t *open = NULL, *close = NULL;
-                if (wp == L'[') { open = L"["; close = L"]"; }
-                else if (wp == L'(') { open = L"("; close = L")"; }
-                else if (wp == L'{') { open = L"{"; close = L"}"; }
-                else if (wp == L'"') { open = L"\""; close = L"\""; }
-                else if (wp == L'\'') { open = L"'"; close = L"'"; }
-                if (open && close) {
-                    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)open);
+                wchar_t next = EditCharAt(h, (int)s0);
+                if (next == (wchar_t)wp) {
                     SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
-                    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)close);
-                    SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
-                    return 0;
+                    WikiCompleteCheck(h);   /* may close the popup */
+                    return 0;   /* skip over the existing bracket */
                 }
             }
         }
@@ -1671,6 +1752,11 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp < 32 && wp != VK_BACK && wp != '\r' && wp != '\n'
             && wp != VK_TAB && wp != 26)
             return 0;
+        /* printable input (and backspace): let it land, then
+         * re-evaluate the [[ autocomplete context */
+        LRESULT r = CallWindowProcW(g_editProc, h, msg, wp, lp);
+        WikiCompleteCheck(h);
+        return r;
     }
     return CallWindowProcW(g_editProc, h, msg, wp, lp);
 }

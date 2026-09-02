@@ -42,6 +42,7 @@
 #define IDM_SHAREHTML  1023
 #define IDM_TREEBAR    1024
 #define IDM_LINKS      1025
+#define IDM_GRAPH      1026
 #define IDM_MRU_BASE   2000   /* + index, up to 2009 */
 
 /* view states */
@@ -100,6 +101,11 @@ void  StartAi(const wchar_t *question);
 void  ShowSelAiMenu(void);
 void  StartAgent(const wchar_t *task);
 void  ShowInsertMenu(void);   /* main.c: @ snippet popup */
+/* [[ note-name autocomplete (main.c); driven from EditProc */
+void  WikiCompleteCheck(HWND edit);        /* re-evaluate caret ctx */
+void  WikiCompleteKey(HWND edit, UINT vk, BOOL *eaten); /* arrows/enter/esc */
+void  HideWikiMenu(void);
+BOOL  WikiMenuActive(void);
 void  AiCancel(void);
 void  AgCancel(void);
 void  AiFlushPending(void);

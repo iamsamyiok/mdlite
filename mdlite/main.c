@@ -408,6 +408,8 @@ BOOL LoadFile(const wchar_t *path)   /* public: tree.c opens files too */
 
 
 
+static void LinksFill(void);          /* forward: refresh after save */
+static BOOL LinksPanelOpen(void);     /* forward: is the panel visible */
 static BOOL SaveFileEx(const wchar_t *path, BOOL isAuto)
 {
     int len = GetWindowTextLengthW(g_edit);
@@ -444,6 +446,13 @@ static BOOL SaveFileEx(const wchar_t *path, BOOL isAuto)
     GitArchive(u8, u8len, isAuto);
     ExtMark();
     free(u8);
+    /* live refresh: keep the graph view and an open backlinks panel
+     * in sync with what was just written to disk */
+    if (g_view == VIEW_GRAPH) {
+        GraphBuild();
+        InvalidateRect(g_hwnd, NULL, FALSE);
+    }
+    if (LinksPanelOpen()) LinksFill();
     return TRUE;
 }
 
@@ -489,8 +498,10 @@ static void ShowHelp(void)
         L"  替换框 Enter 替换当前 · Ctrl+Enter 全部替换 · Esc 关闭。\r\n"
          L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
          L"文件树：Ctrl+B 切换左侧工作区文件列表；Enter 打开，双击目录展开/折叠，Esc 关闭。\r\n"
-         L"链接：Ctrl+Shift+L 弹出反向链接与孤儿笔记面板；双击条目跳转，Esc 关闭。\r\n"
-         L"知识图谱：Ctrl+G 进入全库链接图视图；滚轮缩放、拖拽节点、单击选中高亮、双击跳转并退出，ESC 返回。\r\n"
+         L"链接：Ctrl+Shift+L 弹出反向链接与孤儿笔记面板；双击条目跳转，Esc 关闭；保存后自动刷新。\r\n"
+         L"知识图谱：Ctrl+G 进入/退出全库链接图；滚轮缩放、拖拽节点、双击跳转，ESC 返回。\r\n"
+         L"双链补全：输入 [[ 自动弹出工作区笔记列表，继续输入过滤，↑↓ 选择、Enter/Tab 补全、Esc 关闭。\r\n"
+         L"括号：输入 [ ( { 自动配对并可包裹选区；输入 ) ] } 跳出配对；退格删除整对。\r\n"
         L"AI：行首输入 /问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
         L"Agent：行首输入 //任务 后回车，调用 opencode 在文档目录执行，Esc 终止；超时秒数可在设置中调整。\r\n"
         L"插入：编辑器按 @ 弹出 Markdown 片段菜单，输入过滤、Enter 插入、Esc 关闭。\r\n"
@@ -512,6 +523,7 @@ static void ShowMoreMenu(void)
     HMENU pm = CreatePopupMenu();
     AppendMenuW(pm, MF_STRING, IDM_OUTLINE,    L"大纲\tCtrl+P");
     AppendMenuW(pm, MF_STRING, IDM_LINKS,      L"反向链接与孤儿笔记\tCtrl+Shift+L");
+    AppendMenuW(pm, MF_STRING, IDM_GRAPH,      L"知识图谱\tCtrl+G");
     AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     AppendMenuW(pm, MF_STRING, IDM_COPYHTML,   L"复制为 HTML");
     AppendMenuW(pm, MF_STRING, IDM_EXPORTHTML, L"导出 HTML…");
@@ -2383,6 +2395,11 @@ static const wchar_t *BaseNameOf(const wchar_t *path)
     return b;
 }
 
+static BOOL LinksPanelOpen(void)
+{
+    return g_lkWnd != NULL;
+}
+
 static void LinksFill(void)
 {
     free(g_lkPaths);
@@ -2647,6 +2664,217 @@ static LRESULT CALLBACK InsertProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
+}
+
+/* ------------------------------------------------------------------ */
+/* [[ note-name autocomplete - Obsidian-style: the caret stays in the  */
+/* editor, the filter word is the text between "[[" and the caret,    */
+/* arrows / Enter / Tab / Esc are intercepted by EditProc.            */
+/* ------------------------------------------------------------------ */
+
+#define WK_MAX_NAMES 500
+#define WK_MAX_VIS   256
+static HWND  g_wkWnd, g_wkList;
+static wchar_t (*g_wkNames)[96];
+static int   g_wkNameN;
+static int   g_wkVis[WK_MAX_VIS];
+static int   g_wkVisN;
+static int   g_wkFilterLen;      /* filter length at last check */
+static int   g_wkAnchor;         /* abs pos just after "[[" */
+
+void HideWikiMenu(void)
+{
+    if (g_wkWnd) DestroyWindow(g_wkWnd);
+    g_wkWnd = NULL;
+    g_wkList = NULL;
+}
+
+BOOL WikiMenuActive(void)
+{
+    return g_wkWnd != NULL;
+}
+
+static void WkCollect(const wchar_t *path, void *ctx)
+{
+    (void)ctx;
+    if (g_wkNameN >= WK_MAX_NAMES) return;
+    /* base name without extension */
+    const wchar_t *base = path;
+    for (const wchar_t *p = path; *p; p++)
+        if (*p == L'\\' || *p == L'/') base = p + 1;
+    int n = 0;
+    while (base[n] && base[n] != L'.' && n < 95) n++;
+    if (n <= 0) return;
+    /* dedupe (case-insensitive against stored names) */
+    for (int i = 0; i < g_wkNameN; i++) {
+        int same = 1;
+        for (int k = 0; k < n; k++) {
+            if (lowerW(g_wkNames[i][k]) != lowerW(base[k])
+                || g_wkNames[i][k] == 0) { same = 0; break; }
+        }
+        if (same && g_wkNames[i][n] == 0) return;
+    }
+    for (int i = 0; i < n; i++) g_wkNames[g_wkNameN][i] = base[i];
+    g_wkNames[g_wkNameN][n] = 0;
+    g_wkNameN++;
+}
+
+static void WkFill(const wchar_t *filter, int flen)
+{
+    wchar_t low[96];
+    if (flen > 95) flen = 95;
+    for (int i = 0; i < flen; i++) low[i] = lowerW(filter[i]);
+    low[flen] = 0;
+
+    SendMessageW(g_wkList, LB_RESETCONTENT, 0, 0);
+    g_wkVisN = 0;
+    for (int i = 0; i < g_wkNameN && g_wkVisN < WK_MAX_VIS; i++) {
+        BOOL ok = (flen == 0);
+        if (!ok) {
+            int nl0 = lstrlenW(g_wkNames[i]);
+            for (int k = 0; k <= nl0 - flen && !ok; k++) {
+                int m = 0;
+                while (m < flen && lowerW(g_wkNames[i][k + m]) == low[m]) m++;
+                if (m == flen) ok = TRUE;
+            }
+        }
+        if (ok) {
+            SendMessageW(g_wkList, LB_ADDSTRING, 0,
+                         (LPARAM)g_wkNames[i]);
+            g_wkVis[g_wkVisN++] = i;
+        }
+    }
+    if (g_wkVisN > 0) SendMessageW(g_wkList, LB_SETCURSEL, 0, 0);
+}
+
+static void WkApply(void)
+{
+    int sel = (int)SendMessageW(g_wkList, LB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= g_wkVisN) return;
+    const wchar_t *name = g_wkNames[g_wkVis[sel]];
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    int start = g_wkAnchor;
+    if (start < 0 || (DWORD)start > s0) { HideWikiMenu(); return; }
+    wchar_t rep[128];
+    wsprintfW(rep, L"[[%s]]", name);
+    HideWikiMenu();
+    SendMessageW(g_edit, EM_SETSEL, start, s0);
+    SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)rep);
+    int end = start + lstrlenW(rep);
+    SendMessageW(g_edit, EM_SETSEL, end, end);
+    SendMessageW(g_edit, EM_SCROLLCARET, 0, 0);
+}
+
+static void ShowWikiMenu(void)
+{
+    if (g_wkWnd) return;
+    if (!g_wkNames)
+        g_wkNames = (wchar_t (*)[96])malloc(
+            WK_MAX_NAMES * sizeof(*g_wkNames));
+    if (!g_wkNames) return;
+    g_wkNameN = 0;
+    TreeForEachFile(WkCollect, NULL);
+    if (g_wkNameN == 0) return;
+
+    g_wkWnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        L"STATIC", NULL, WS_POPUP,
+        0, 0, SC(260), SC(180), g_hwnd, NULL, NULL, NULL);
+    g_wkList = CreateWindowExW(0, L"LISTBOX", NULL,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY
+        | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
+        0, 0, SC(260), SC(180), g_wkWnd, (HMENU)3, NULL, NULL);
+    SendMessageW(g_wkList, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+}
+
+static void WkPosition(void)
+{
+    if (!g_wkWnd) return;
+    POINT pt = { 0, 0 };
+    GetCaretPos(&pt);            /* caret pos inside the edit control */
+    ClientToScreen(g_edit, &pt);
+    ScreenToClient(g_hwnd, &pt);
+    RECT rcBody;
+    GetBodyRect(&rcBody);
+    int x = rcBody.left + pt.x;
+    int y = rcBody.top + pt.y + SC(20);
+    int w = SC(260), hh = SC(180);
+    RECT rcWnd;
+    GetWindowRect(g_hwnd, &rcWnd);
+    if (x + w > rcBody.right) x = rcBody.right - w;
+    if (x < rcBody.left) x = rcBody.left;
+    if (y + hh > rcBody.bottom) y = rcBody.top + pt.y - SC(20) - hh;
+    if (y < rcBody.top) y = rcBody.top;
+    SetWindowPos(g_wkWnd, HWND_TOPMOST, x, y, w, hh,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void WikiCompleteCheck(HWND edit)
+{
+    (void)edit;
+    if (g_view != VIEW_EDIT && g_view != VIEW_SPLIT) {
+        HideWikiMenu();
+        return;
+    }
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    if (s0 != e0) { HideWikiMenu(); return; }
+    int li = (int)SendMessageW(g_edit, EM_LINEFROMCHAR, s0, 0);
+    int ls = (int)SendMessageW(g_edit, EM_LINEINDEX, li, 0);
+    int off = (int)s0 - ls;
+    wchar_t buf[1024];
+    *(LPWORD)buf = (WORD)(sizeof(buf) / sizeof(wchar_t) - 1);
+    int got = (int)SendMessageW(g_edit, EM_GETLINE, li, (LPARAM)buf);
+    if (got > 0) buf[got] = 0; else buf[0] = 0;
+    /* need "[[" right before the filter word */
+    if (off < 2 || buf[off-1] != L'[' || buf[off-2] != L'[') {
+        HideWikiMenu();
+        return;
+    }
+    /* filter word: from after "[[" up to the caret; stop at any bracket */
+    int fwEnd = off;
+    int fwBegin = off - 2;
+    while (fwBegin > 0 && buf[fwBegin-1] != L'['
+           && buf[fwBegin-1] != L']' && (off - fwBegin) < 64)
+        fwBegin--;
+    if (fwBegin > 0 && (buf[fwBegin-1] == L']')) { HideWikiMenu(); return; }
+    /* the two chars at fwBegin-1, fwBegin must be "[[" */
+    if (!(fwBegin >= 2 && buf[fwBegin-1] == L'[' && buf[fwBegin-2] == L'[')) {
+        /* allow exactly the "[[" typed right before caret */
+        if (fwBegin != off - 2) { HideWikiMenu(); return; }
+        fwBegin = off - 2;
+    }
+    int flen = fwEnd - fwBegin;
+    if (flen > 64) { HideWikiMenu(); return; }
+
+    if (!g_wkWnd) ShowWikiMenu();
+    if (!g_wkWnd) return;
+    g_wkFilterLen = flen;
+    g_wkAnchor = ls + fwBegin;
+    WkFill(buf + fwBegin, flen);
+    if (g_wkVisN == 0) { HideWikiMenu(); return; }
+    WkPosition();
+}
+
+void WikiCompleteKey(HWND edit, UINT vk, BOOL *eaten)
+{
+    (void)edit;
+    *eaten = 0;
+    if (!g_wkWnd) return;
+    if (vk == VK_DOWN || vk == VK_UP) {
+        int cur = (int)SendMessageW(g_wkList, LB_GETCURSEL, 0, 0);
+        if (cur < 0) cur = 0;
+        if (vk == VK_DOWN && cur + 1 < g_wkVisN) cur++;
+        if (vk == VK_UP && cur > 0) cur--;
+        SendMessageW(g_wkList, LB_SETCURSEL, cur, 0);
+        *eaten = 1;
+    } else if (vk == VK_RETURN || vk == VK_TAB) {
+        WkApply();
+        *eaten = 1;
+    } else if (vk == VK_ESCAPE) {
+        HideWikiMenu();
+        *eaten = 1;
+    }
 }
 
 void ShowInsertMenu(void)
@@ -3038,7 +3266,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case IDM_NEW:      DoNew();                 return 0;
-        case IDM_TOGGLE:   SetView((g_view + 1) % 4); return 0;
+        case IDM_TOGGLE:   SetView(g_view == VIEW_EDIT ? VIEW_SPLIT
+                            : (g_view == VIEW_SPLIT ? VIEW_PREVIEW
+                                                    : VIEW_EDIT)); return 0;
+        case IDM_GRAPH:
+            SetView(g_view == VIEW_GRAPH ? VIEW_EDIT : VIEW_GRAPH);
+            return 0;
         case IDM_FIND:     ShowFindBar(FALSE);      return 0;
         case IDM_REPLACE:  ShowFindBar(TRUE);       return 0;
         case IDM_FINDNEXT: DoFind(1);               return 0;
@@ -3076,7 +3309,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == 'O') { SendMessageW(hwnd, WM_EDITCMD, IDM_OPEN, 0); return 0; }
             if (wp == 'N') { SendMessageW(hwnd, WM_EDITCMD, IDM_NEW, 0);  return 0; }
             if (wp == 'B') { SendMessageW(hwnd, WM_EDITCMD, IDM_TREEBAR, 0); return 0; }
-            if (wp == 'G') { SendMessageW(hwnd, WM_EDITCMD, IDM_TOGGLE, 0); return 0; }
+            if (wp == 'G') { SendMessageW(hwnd, WM_EDITCMD, IDM_GRAPH, 0); return 0; }
             if (wp == 'L' && (GetKeyState(VK_SHIFT) & 0x8000)) {
                 SendMessageW(hwnd, WM_EDITCMD, IDM_LINKS, 0); return 0;
             }

@@ -454,20 +454,16 @@ static int g_edgeN, g_edgeCap;
 static wchar_t (*g_mdFiles)[MAX_PATH];
 static int g_fileN, g_fileCap;
 
-static void CollectMd(TreeNode *n)
+static void CollectMd(const wchar_t *path, void *ctx)
 {
-    for (; n; n = n->next) {
-        if (n->isDir) CollectMd(n->child);
-        else {
-            if (g_fileN == g_fileCap) {
-                g_fileCap = g_fileCap ? g_fileCap * 2 : 32;
-                g_mdFiles = (wchar_t (*)[MAX_PATH])realloc(
-                    g_mdFiles, g_fileCap * sizeof(*g_mdFiles));
-            }
-            if (g_mdFiles)
-                lstrcpynW(g_mdFiles[g_fileN++], n->path, MAX_PATH);
-        }
+    (void)ctx;
+    if (g_fileN == g_fileCap) {
+        g_fileCap = g_fileCap ? g_fileCap * 2 : 32;
+        g_mdFiles = (wchar_t (*)[MAX_PATH])realloc(
+            g_mdFiles, g_fileCap * sizeof(*g_mdFiles));
     }
+    if (g_mdFiles)
+        lstrcpynW(g_mdFiles[g_fileN++], path, MAX_PATH);
 }
 
 static void AddEdge(const wchar_t *src, const wchar_t *dst, int dstLen)
@@ -553,8 +549,8 @@ void TreeScanLinks(void)
 {
     g_edgeN = 0;
     g_fileN = 0;
-    if (!g_root) return;
-    CollectMd(g_root);
+    if (!g_wsDir[0]) return;
+    TreeForEachFile(CollectMd, NULL);
     for (int f = 0; f < g_fileN; f++) {
         char *u8 = NULL;
         int u8len = 0;
@@ -696,23 +692,40 @@ BOOL TreeJumpResolve(const wchar_t *docPath, const wchar_t *target,
 
 /* ------------------------------------------------------------------ */
 /* public traversal: call cb(path, ctx) for every leaf .md file        */
+/*                                                                     */
+/* Walks the directory tree on disk with its own enumeration so it     */
+/* never depends on which folders the user expanded in the sidebar     */
+/* (the sidebar is lazy; the graph / backlink index must see all).     */
 /* ------------------------------------------------------------------ */
 
-static void ForEachFileRec(TreeNode *n,
+static void ForEachDiskRec(const wchar_t *dir, int depth,
                            void (*cb)(const wchar_t *path, void *ctx),
                            void *ctx)
 {
-    for (; n; n = n->next) {
-        if (n->isDir) {
-            if (n->child) ForEachFileRec(n->child, cb, ctx);
-        } else {
-            cb(n->path, ctx);
-        }
-    }
+    if (depth > 6) return;                 /* runaway-nesting guard */
+    wchar_t pat[MAX_PATH];
+    wsprintfW(pat, L"%s\\*", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    int count = 0;
+    do {
+        if (fd.cFileName[0] == L'.') continue;   /* hidden + . & .. */
+        BOOL isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (!isDir && !IsMdName(fd.cFileName)) continue;
+        if (++count > TREE_MAX_PER_DIR) break;
+        wchar_t full[MAX_PATH];
+        wsprintfW(full, L"%s\\%s", dir, fd.cFileName);
+        if (isDir)
+            ForEachDiskRec(full, depth + 1, cb, ctx);
+        else
+            cb(full, ctx);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }
 
 void TreeForEachFile(void (*cb)(const wchar_t *path, void *ctx), void *ctx)
 {
-    if (!g_root || !g_root->child) return;
-    ForEachFileRec(g_root->child, cb, ctx);
+    if (!g_wsDir[0]) return;
+    ForEachDiskRec(g_wsDir, 0, cb, ctx);
 }
