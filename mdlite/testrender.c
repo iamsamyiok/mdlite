@@ -195,6 +195,34 @@ int main(void)
         free(html);
     }
 
+    /* ---- highlighted line: "==full line==" yellow bar ---- */
+    const wchar_t *mdL = L"==重点内容==\n\n普通段落\n";
+    ZeroMemory(&doc, sizeof(doc));
+    md_build(&doc, mdL, lstrlenW(mdL), &f, sdc, W);
+    expect(doc.nlines >= 2
+           && doc.lines[0].type == LT_TEXT && doc.lines[0].hlbar == 1
+           && doc.lines[2].type == LT_TEXT && doc.lines[2].hlbar == 0,
+           "hlbar: full-line highlight parsed");
+    bits = NULL;
+    dib = CreateDIBSection(0, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+    mem = CreateCompatibleDC(0);
+    SelectObject(mem, dib);
+    md_paint(&doc, mem, &rc, 0, &f, NULL);
+    int barPx = count_color(bits, 8, 0, W - 8, doc.height,
+                            RGB(255, 244, 181));
+    expect(barPx > 400, "hlbar: yellow bar painted");
+    DeleteDC(mem);
+    DeleteObject(dib);
+    md_free(&doc);
+    {
+        const wchar_t *mdLH = L"==高亮行==\n";
+        char *html = NULL;
+        int hn2 = md_to_html(mdLH, lstrlenW(mdLH), &html);
+        expect(hn2 > 0 && html && strstr(html, "<p class=\"hl\">"),
+               "html: highlighted line exported");
+        free(html);
+    }
+
     /* ---- image rendering (requires i.png) ---- */
     const wchar_t *md3 = L"![x](i.png)\n";
     ZeroMemory(&doc, sizeof(doc));

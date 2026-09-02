@@ -486,38 +486,117 @@ static void SetTopmost(BOOL on)
 }
 
 
+static const wchar_t *HELP_TEXT =
+    L"MDLite 使用帮助\r\n"
+    L"\r\n"
+    L"【视图】\r\n"
+    L"编辑 / 分屏 / 预览三态：Ctrl+/ 切换，或点右上分段。\r\n"
+    L"缩放：Ctrl+滚轮 85%-150% 五档。\r\n"
+    L"\r\n"
+    L"【文件】\r\n"
+    L"Ctrl+N 新建，Ctrl+O 打开，Ctrl+S 保存，Ctrl+Shift+S 另存；拖拽 .md 直接打开。\r\n"
+    L"自动保存：设置中可配间隔（秒，0=关闭），默认 60 秒。\r\n"
+    L"文件树：Ctrl+B 切换左侧工作区文件列表；Enter 打开，双击目录展开/折叠，Esc 关闭。\r\n"
+    L"\r\n"
+    L"【编辑】\r\n"
+    L"查找：Ctrl+F，替换：Ctrl+H；Enter 查找下一个，Shift+Enter 上一个；\r\n"
+    L"  替换框 Enter 替换当前，Ctrl+Enter 全部替换，Esc 关闭。\r\n"
+    L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
+    L"括号：输入 [ ( { 自动配对并可包裹选区；输入 ) ] } 跳出配对；退格删除整对。\r\n"
+    L"\r\n"
+    L"【斜杠命令】\r\n"
+    L"输入 / 弹出块命令菜单：问 AI、Agent、标题、任务/无序/有序列表、\r\n"
+    L"  代码块、表格、引用块、提示框、突出显示、帽头、分隔线、今日日期。\r\n"
+    L"  输入即过滤，↑↓ 选择，Enter/Tab 应用，Esc 关闭。\r\n"
+    L"  过滤无匹配时菜单自动消失：行首 /问题 + Enter 仍是 AI 问答，\r\n"
+    L"  //命令 + Enter 仍是 Agent，两种老用法不受影响。\r\n"
+    L"\r\n"
+    L"【双链与图谱】\r\n"
+    L"双链补全：输入 [[ 自动弹出工作区笔记列表，继续输入过滤，\r\n"
+    L"  ↑↓ 选择、Enter/Tab 补全、Esc 关闭。\r\n"
+    L"反向链接：Ctrl+Shift+L 弹出反向链接与孤儿笔记面板；双击条目跳转，\r\n"
+    L"  Esc 关闭；保存后自动刷新。\r\n"
+    L"知识图谱：Ctrl+G 进入/退出全库链接图；滚轮缩放、拖拽节点、\r\n"
+    L"  双击跳转，Esc 返回。节点右上角数字为连接数。\r\n"
+    L"\r\n"
+    L"【格式与渲染】\r\n"
+    L"突出显示：整行用 == 包裹（==重点内容==）显示为黄色高亮条，\r\n"
+    L"  斜杠命令选「突出显示」快速插入。\r\n"
+    L"提示框：> [!NOTE] / [!TIP] / [!IMPORTANT] / [!WARNING] / [!CAUTION]\r\n"
+    L"  渲染为五色卡片；斜杠命令选「提示框」插入骨架。\r\n"
+    L"帽头：三个横杠包裹的文档头（title/tags/date），斜杠命令选「帽头」，\r\n"
+    L"  日期自动填今天。\r\n"
+    L"插入片段：编辑器按 @ 弹出 Markdown 片段菜单（粗体、斜体、链接、\r\n"
+    L"  图片、脚注等 17 项），输入过滤、Enter 插入、Esc 关闭。\r\n"
+    L"\r\n"
+    L"【AI 与 Agent】\r\n"
+    L"AI：行首输入 /问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
+    L"Agent：行首输入 //任务 后回车，调用 opencode 在文档目录执行，\r\n"
+    L"  Esc 终止；超时秒数可在设置中调整。\r\n"
+    L"\r\n"
+    L"【其他】\r\n"
+    L"置顶：标题栏「置顶」按钮切换窗口总在最前。\r\n"
+    L"分享：更多菜单可导出自包含 HTML（图片内嵌），单文件发任意设备浏览器可看。\r\n"
+    L"历史：点「历史」查看版本，点击恢复；行右侧 ✕ 删除单条；上限在设置中调整。\r\n"
+    L"热键：设置中可配全局呼出热键（默认 Ctrl+Shift+Space）。\r\n"
+    L"托盘：关闭窗口最小化到托盘，右键退出。\r\n"
+    L"本帮助：标题栏「?」按钮或更多菜单「帮助」，F1 亦可打开。";
+
+static LRESULT CALLBACK HelpProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        DestroyWindow(h);
+        return 0;
+    }
+    if (msg == WM_SIZE) {
+        HWND ed = GetWindow(h, GW_CHILD);
+        if (ed) MoveWindow(ed, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        HWND owner = GetWindow(h, GW_OWNER);
+        if (owner) EnableWindow(owner, TRUE);
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
 static void ShowHelp(void)
 {
-    static const wchar_t *help =
-        L"MDLite 使用帮助\r\n"
-        L"\r\n"
-        L"视图：编辑 / 分屏 / 预览三态，Ctrl+/ 切换，或点右上分段。\r\n"
-        L"文件：Ctrl+N 新建，Ctrl+O 打开，Ctrl+S 保存，Ctrl+Shift+S 另存；拖拽 .md 直接打开。\r\n"
-        L"查找：Ctrl+F，替换：Ctrl+H。\r\n"
-        L"  Enter 查找下一个 · Shift+Enter 上一个\r\n"
-        L"  替换框 Enter 替换当前 · Ctrl+Enter 全部替换 · Esc 关闭。\r\n"
-         L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
-         L"斜杠命令：输入 / 弹出块命令菜单（问 AI、Agent、标题、列表、\r\n"
-         L"  代码块、表格、提示框、帽头、日期等）；输入过滤，↑↓ 选择、\r\n"
-         L"  Enter/Tab 应用、Esc 关闭；过滤无匹配时菜单自动消失，\r\n"
-         L"  行首 /问题 + Enter 仍是 AI 问答、//命令 + Enter 仍是 Agent。\r\n"
-         L"文件树：Ctrl+B 切换左侧工作区文件列表；Enter 打开，双击目录展开/折叠，Esc 关闭。\r\n"
-         L"链接：Ctrl+Shift+L 弹出反向链接与孤儿笔记面板；双击条目跳转，Esc 关闭；保存后自动刷新。\r\n"
-         L"知识图谱：Ctrl+G 进入/退出全库链接图；滚轮缩放、拖拽节点、双击跳转，ESC 返回。\r\n"
-         L"双链补全：输入 [[ 自动弹出工作区笔记列表，继续输入过滤，↑↓ 选择、Enter/Tab 补全、Esc 关闭。\r\n"
-         L"括号：输入 [ ( { 自动配对并可包裹选区；输入 ) ] } 跳出配对；退格删除整对。\r\n"
-        L"AI：行首输入 /问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
-        L"Agent：行首输入 //任务 后回车，调用 opencode 在文档目录执行，Esc 终止；超时秒数可在设置中调整。\r\n"
-        L"插入：编辑器按 @ 弹出 Markdown 片段菜单，输入过滤、Enter 插入、Esc 关闭。\r\n"
-        L"置顶：标题栏「置顶」按钮切换窗口总在最前。\r\n"
-        L"分享：更多菜单可导出自包含 HTML（图片内嵌），单文件发任意设备浏览器可看。\r\n"
-        L"历史：点「历史」查看版本，点击恢复；行右侧 ✕ 删除单条；上限在设置中调整。\r\n"
-        L"自动保存：设置中可配间隔（秒，0=关闭），默认 60 秒。\r\n"
-        L"HTML：更多菜单可复制 / 导出 HTML，与预览同款渲染。\r\n"
-        L"热键：设置中可配全局呼出热键（默认 Ctrl+Shift+Space）。\r\n"
-        L"缩放：Ctrl+滚轮 85%-150% 五档。\r\n"
-        L"托盘：关闭窗口最小化到托盘，右键退出。";
-    MessageBoxW(g_hwnd, help, L"MDLite 帮助", MB_ICONINFORMATION);
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASSW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc = HelpProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"MDLiteHelp";
+        if (!RegisterClassW(&wc)) return;
+        registered = TRUE;
+    }
+    /* one window at a time */
+    HWND exist = FindWindowW(L"MDLiteHelp", NULL);
+    if (exist) { SetForegroundWindow(exist); return; }
+
+    EnableWindow(g_hwnd, FALSE);   /* modal-ish */
+    int w = SC(600), h = SC(560);
+    RECT rcMain;
+    GetWindowRect(g_hwnd, &rcMain);
+    int x = rcMain.left + (rcMain.right - rcMain.left - w) / 2;
+    int y = rcMain.top + (rcMain.bottom - rcMain.top - h) / 2;
+    HWND hw = CreateWindowExW(WS_EX_TOOLWINDOW, L"MDLiteHelp",
+        L"MDLite 帮助",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
+        x, y, w, h, g_hwnd, NULL, NULL, NULL);
+    if (!hw) { EnableWindow(g_hwnd, TRUE); return; }
+    HWND ed = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", HELP_TEXT,
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY
+        | WS_VSCROLL | ES_AUTOVSCROLL,
+        0, 0, w, h, hw, (HMENU)1, NULL, NULL);
+    SendMessageW(ed, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+    ShowWindow(hw, SW_SHOW);
+    SetFocus(ed);
 }
 
 /* "more" dropdown anchored under header button 4 */
@@ -783,9 +862,17 @@ static void ApplyZoom(int dir)
 /* header widgets                                                      */
 /* ------------------------------------------------------------------ */
 
-static RECT BtnRect(int id) /* 0 open 1 save 2 history 3 settings 4 more 5 topmost 6 files */
+static RECT BtnRect(int id) /* 0 open 1 save 2 history 3 settings 4 more 5 topmost 6 files 7 help */
 {
     RECT rc;
+    if (id == 7) {                 /* help button right of files */
+        rc.left = SC(14) + 5 * (SC(64) + SC(8))
+                  + 2 * (SC(48) + SC(8));
+        rc.top = SC(10);
+        rc.right = rc.left + SC(48);
+        rc.bottom = rc.top + SC(28);
+        return rc;
+    }
     if (id == 6) {                 /* narrow tree toggle right of topmost */
         rc.left = SC(14) + 5 * (SC(64) + SC(8)) + SC(48) + SC(8);
         rc.top = SC(10);
@@ -824,7 +911,7 @@ static int HitTestHeader(POINT pt)
 {
     POINT p = pt;
     if (p.y < 0 || p.y > HeaderH()) return -1;
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         RECT r = BtnRect(i);
         if (PtInRect(&r, p)) return i;
     }
@@ -1730,6 +1817,26 @@ static void DrawHeader(HDC dc, RECT *rcClient)
         GetTextMetricsW(dc, &tm);
         int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
         TextOutW(dc, tx, ty, fl, lstrlenW(fl));
+        SelectObject(dc, old);
+    }
+
+    /* help button - plain white pill with "?" */
+    {
+        static const wchar_t *q = L"?";
+        RECT r = BtnRect(7);
+        int hot = (g_hoverId == 7);
+        DrawRoundRect(dc, &r, SC(14),
+                      hot ? COL_BTNHVR : RGB(255, 255, 255),
+                      COL_BTNBRD, 1);
+        HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
+        SetTextColor(dc, COL_BTNTXT);
+        SetBkMode(dc, TRANSPARENT);
+        int tx = r.left + (r.right - r.left) / 2
+                 - text_w(dc, g_fontHeader, q, lstrlenW(q)) / 2;
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
+        TextOutW(dc, tx, ty, q, lstrlenW(q));
         SelectObject(dc, old);
     }
 
@@ -2912,6 +3019,7 @@ static const SlItem SLASH_ITEMS[] = {
                    L"| 内容 | 内容 |", L"", L"", 0 },
     { L"引用块",   L"\r\n", L"> 引用内容", L"", 0 },
     { L"提示框",   L"\r\n> [!NOTE] ", L"标题", L"\r\n> 正文", 0 },
+    { L"突出显示", L"\r\n==", L"重点内容", L"==", 0 },
     { L"帽头",     NULL, NULL, NULL, SL_FRONTMATTER },
     { L"分隔线",   L"\r\n---\r\n", L"", L"", 0 },
     { L"今日日期", NULL, NULL, NULL, SL_DATE },
@@ -3581,6 +3689,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == VK_OEM_COMMA) { SendMessageW(hwnd, WM_EDITCMD, IDM_SETTINGS, 0); return 0; }
             if (wp == VK_OEM_2) { SendMessageW(hwnd, WM_EDITCMD, IDM_TOGGLE, 0); return 0; }
         }
+        if (wp == VK_F1) { ShowHelp(); return 0; }
         if (g_view == VIEW_PREVIEW) {
             int step = g_fonts.bodyH + (g_fonts.bodyH >> 1);
             RECT rcBody;
@@ -3691,6 +3800,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (id == 4) ShowMoreMenu();
         else if (id == 5) { SetTopmost(!g_topmost); SaveSettings(); }
         else if (id == 6) { TreeToggle(); SaveSettings(); }
+        else if (id == 7) ShowHelp();
         else if (id >= 10 && id <= 12) SetView(id - 10);
         return 0;
     }

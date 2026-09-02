@@ -1074,6 +1074,12 @@ void md_build(MDDoc *doc, const wchar_t *src, int srcLen,
         }
 
         L = push_line(doc, LT_TEXT);
+        /* "==full line==" renders as a highlighted bar (Notion style) */
+        if (len >= 5 && s[0] == L'=' && s[1] == L'='
+            && s[len-1] == L'=' && s[len-2] == L'=') {
+            L->hlbar = 1;
+            s += 2; len -= 4;
+        }
 
     have_line:
         parse_inline(s, len, 0, 0, &rb, NULL, 0);
@@ -1550,6 +1556,15 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
             int hl = 0;
             if (L->type >= LT_H1 && L->type <= LT_H6)
                 hl = L->type - LT_H1 + 1;
+            if (L->hlbar) {   /* highlighted line: yellow bar behind */
+                RECT hb = { x - 8, top + 1, x + contentW + 4, bottom - 1 };
+                HBRUSH br = CreateSolidBrush(RGB(255, 244, 181));
+                HRGN rg = CreateRoundRectRgn(hb.left, hb.top,
+                                             hb.right, hb.bottom, 6, 6);
+                FillRgn(hdc, rg, br);
+                DeleteObject(rg);
+                DeleteObject(br);
+            }
             if (hl == 1 || hl == 2) {
                 int ruleY = bottom - 2;
                 HPEN pen = CreatePen(PS_SOLID, 1, g_colHeadingRule);
@@ -2020,6 +2035,8 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
               ".alert.t5 b.tag{color:#cf222e}\n"
               "a{color:#007aff}\nimg{max-width:100%}\n"
               "mark{background:#fff4b5;padding:0 2px}\n"
+              "p.hl{background:#fff4b5;border-radius:4px;"
+              "padding:2px 10px;display:block}\n"
               "hr{border:none;border-top:1px solid #d2d2d7}\n"
               "</style>\n</head>\n<body>\n");
 
@@ -2298,6 +2315,17 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
         if (inOl) { h_app(&o, "</ol>\n"); inOl = 0; }
         h_close_q(&o, &qLv);
         h_close_alert(&o, &inAlertH);
+        /* "==full line==" renders as a highlighted bar */
+        if (sl >= 5 && s[0] == L'=' && s[1] == L'='
+            && s[sl-1] == L'=' && s[sl-2] == L'=') {
+            if (inP) { h_app(&o, "</p>\n"); inP = 0; }
+            h_app(&o, "<p class=\"hl\">");
+            h_inline(&o, s + 2, sl - 4, 0);
+            h_app(&o, "</p>\n");
+            pos += adv;
+            if (pos > srcLen) break;
+            continue;
+        }
         if (!inP) { h_app(&o, "<p>"); inP = 1; }
         else h_app(&o, "<br>\n");
         h_inline(&o, s, sl, 0);

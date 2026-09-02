@@ -70,6 +70,7 @@ typedef struct MDLine {
     char task;       /* 0 none, 1 unchecked box, 2 checked box */
     char alert;      /* quote line: 0 plain, 1..5 [!TYPE] tag line,
                       * 6 body line inside a callout card */
+    char hlbar;      /* text line fully wrapped in ==..== : bar */
     /* table row payload (LT_TABLEROW) */
     MDCell *cells;
     int ncells;
