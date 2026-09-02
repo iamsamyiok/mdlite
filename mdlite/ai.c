@@ -1591,6 +1591,26 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             ShowInsertMenu();
             return 0;
         }
+        /* auto-close brackets: [, (, {, ", ' */
+        if (wp == L'[' || wp == L'(' || wp == L'{' || wp == L'"' || wp == L'\'') {
+            DWORD s0 = 0, e0 = 0;
+            SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+            if (s0 == e0) {
+                const wchar_t *open = NULL, *close = NULL;
+                if (wp == L'[') { open = L"["; close = L"]"; }
+                else if (wp == L'(') { open = L"("; close = L")"; }
+                else if (wp == L'{') { open = L"{"; close = L"}"; }
+                else if (wp == L'"') { open = L"\""; close = L"\""; }
+                else if (wp == L'\'') { open = L"'"; close = L"'"; }
+                if (open && close) {
+                    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)open);
+                    SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
+                    SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)close);
+                    SendMessageW(h, EM_SETSEL, s0 + 1, s0 + 1);
+                    return 0;
+                }
+            }
+        }
         if (wp == VK_TAB && !(GetKeyState(VK_CONTROL) & 0x8000)) {
             SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)L"    ");
             return 0;

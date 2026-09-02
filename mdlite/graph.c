@@ -137,6 +137,7 @@ static void ScanFileForLinks(const wchar_t *path)
         }
         if (inFence) continue;
         if (w[i] == L'[' && w[i+1] == L'[') {
+            /* wiki-link [[target]] */
             int j = i + 2;
             while (w[j] && !(w[j] == L']' && w[j+1] == L']')) j++;
             if (w[j] == L']' && j > i + 2) {
@@ -158,6 +159,37 @@ static void ScanFileForLinks(const wchar_t *path)
                     g_nodes[di].inDeg++;
                 }
                 i = j + 1;
+            }
+        } else if (w[i] == L'[' && w[i+1] != L'[') {
+            /* standard markdown link [text](target) */
+            int j = i + 1;
+            while (w[j] && w[j] != L']') j++;
+            if (w[j] == L']' && w[j+1] == L'(') {
+                int k = j + 2;
+                while (w[k] && w[k] != L')') k++;
+                if (w[k] == L')' && k > j + 1) {
+                    int si = -1;
+                    for (int m = 0; m < g_nN; m++)
+                        if (lstrcmpiW(g_nodes[m].path, path) == 0) { si = m; break; }
+                    if (si >= 0) {
+                        const wchar_t *tgt = w + j + 2;
+                        if (tgt[0] == L'.' && (tgt[1] == L'/' || tgt[1] == L'\\'))
+                            tgt += 2;
+                        wchar_t tgtNorm[260];
+                        NormTarget(tgt, tgtNorm, 260);
+                        int di = -1;
+                        for (int m = 0; m < g_nN; m++) {
+                            wchar_t nm[260];
+                            NormTarget(g_nodes[m].name, nm, 260);
+                            if (lstrcmpW(nm, tgtNorm) == 0) { di = m; break; }
+                        }
+                        if (di >= 0 && di != si) {
+                            AddEdge(si, di);
+                            g_nodes[si].outDeg++;
+                            g_nodes[di].inDeg++;
+                        }
+                    }
+                }
             }
         }
     }
@@ -330,6 +362,29 @@ static void GraphDrawNode(HDC dc, int idx)
     DrawTextW(dc, n->name, -1, &lr,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(dc, oldFont);
+
+    /* draw connection count badge */
+    int totalDeg = n->inDeg + n->outDeg;
+    if (totalDeg > 0) {
+        wchar_t badge[16];
+        wsprintfW(badge, L"%d", totalDeg);
+        int tw = (int)lstrlenW(badge);
+        int bw = tw * 7 + 8;
+        int bh = 16;
+        int bx = (int)ceilf(nx + nw) - bw - 4;
+        int by = (int)floorf(ny) - bh - 2;
+        if (by < (int)ny) by = (int)ny;
+        HBRUSH bbr = CreateSolidBrush(idx == g_activeFileIdx
+                                      ? RGB(0x00,0x7A,0xFF)
+                                      : RGB(0x6E,0x6E,0x73));
+        FillRect(dc, &(RECT){bx, by, bx+bw, by+bh}, bbr);
+        DeleteObject(bbr);
+        HFONT of2 = (HFONT)SelectObject(dc, g_fontHeader);
+        SetTextColor(dc, RGB(255,255,255));
+        RECT tr = {bx + 4, by + 2, bx + bw - 4, by + bh - 2};
+        DrawTextW(dc, badge, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, of2);
+    }
 }
 
 static void GraphDrawEdge(HDC dc, int ei)

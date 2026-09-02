@@ -485,7 +485,8 @@ static void AddEdge(const wchar_t *src, const wchar_t *dst, int dstLen)
     g_edgeN++;
 }
 
-/* scan file text for [[wiki targets]]; fenced code blocks are skipped */
+/* scan file text for links: [[wiki targets]] and [text](targets);
+ * fenced code blocks are skipped */
 static void ScanFileForLinks(const wchar_t *path, const wchar_t *text)
 {
     int inFence = 0;
@@ -501,11 +502,28 @@ static void ScanFileForLinks(const wchar_t *path, const wchar_t *text)
         }
         if (inFence) continue;
         if (text[i] == L'[' && text[i+1] == L'[') {
+            /* wiki-link [[target]] or [[target|label]] */
             int j = i + 2;
             while (text[j] && !(text[j] == L']' && text[j+1] == L']')) j++;
             if (text[j] == L']' && j > i + 2) {
                 AddEdge(path, text + i + 2, j - i - 2);
                 i = j + 1;
+            }
+        } else if (text[i] == L'[' && text[i+1] != L'[') {
+            /* standard markdown link [text](target) */
+            int j = i + 1;
+            while (text[j] && text[j] != L']') j++;
+            if (text[j] == L']' && text[j+1] == L'(') {
+                int k = j + 2;
+                while (text[k] && text[k] != L')') k++;
+                if (text[k] == L')' && k > j + 1) {
+                    int tlen = k - j - 1;
+                    /* strip optional leading ./ or .\ */
+                    const wchar_t *tgt = text + j + 2;
+                    if (tgt[0] == L'.' && (tgt[1] == L'/' || tgt[1] == L'\\'))
+                        tgt += 2;
+                    AddEdge(path, tgt, tlen - (tgt - (text + j + 2)));
+                }
             }
         }
     }
