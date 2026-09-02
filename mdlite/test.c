@@ -12,6 +12,30 @@ static void expect(int cond, const char *what)
     if (!cond) g_fail = 1;
 }
 
+/* markdown.c references gitlite.c's reader for share export; provide a
+ * real minimal implementation here so the standalone tests can run. */
+BOOL ReadAllBytes(const wchar_t *path, char **buf, int *len)
+{
+    *buf = NULL;
+    *len = 0;
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE || size > 64 * 1024 * 1024) {
+        CloseHandle(h);
+        return FALSE;
+    }
+    char *b = (char *)malloc(size ? size : 1);
+    DWORD got = 0;
+    BOOL ok = b && ReadFile(h, b, size, &got, NULL) && got == size;
+    CloseHandle(h);
+    if (!ok) { free(b); return FALSE; }
+    *buf = b;
+    *len = (int)size;
+    return TRUE;
+}
+
 int main(void)
 {
     MDFonts f;
@@ -295,6 +319,54 @@ int main(void)
     expect(hFnOl && hFnLi && hFnSup, "html: footnotes section emitted");
     free(html);
 
+    /* ---- wiki links ---- */
+    {
+        const wchar_t *wmd =
+            L"see [[Target Note]] and [[tgt|wiki]] here.\n"
+            L"\n"
+            L"normal [link](https://x) stays a link\n"
+            L"code span `[[not wiki]]` is literal\n";
+        md_build(&doc, wmd, lstrlenW(wmd), &f, dc, 700);
+        int plainN = 0, pipeN = 0, lblOk = 0, codeLeak = 0;
+        for (int li = 0; li < doc.nlines; li++)
+            for (int si = 0; si < doc.lines[li].nsubs; si++)
+                for (int ri = 0; ri < doc.lines[li].subs[si].nruns; ri++) {
+                    const MDRun *r = &doc.lines[li].subs[si].runs[ri];
+                    if (!(r->flags & RF_WIKILINK)) continue;
+                    /* word-wrapping may split one link into several
+                     * runs; count unique targets instead */
+                    if (r->urlLen == 11
+                        && !wcsncmp(r->url, L"Target Note", 11))
+                        plainN++;
+                    else if (r->urlLen == 3 && !wcsncmp(r->url, L"tgt", 3)) {
+                        pipeN++;
+                        if (r->len == 4 && !wcsncmp(r->ptr, L"wiki", 4))
+                            lblOk = 1;
+                    } else
+                        codeLeak++;
+                }
+        expect(plainN >= 1, "wikilink: plain target kept as url");
+        expect(pipeN >= 1, "wikilink: [[target|label]] splits text/target");
+        expect(lblOk, "wikilink: label text used for display");
+        expect(codeLeak == 0, "wikilink: no bogus targets parsed");
+        md_free(&doc);
+
+        html = NULL;
+        hl = md_to_html(wmd, lstrlenW(wmd), &html);
+        int hWiki1 = 0, hWiki2 = 0;
+        if (html) {
+            for (int i = 0; i + 21 < hl; i++) {
+                if (!strncmp(html + i, "href=\"Target Note.md\"", 21))
+                    hWiki1 = 1;
+                if (!strncmp(html + i, "href=\"tgt.md\">wiki</a>", 22))
+                    hWiki2 = 1;
+            }
+        }
+        expect(hWiki1, "wikilink: html href target.md emitted");
+        expect(hWiki2, "wikilink: html label split emitted");
+        free(html);
+    }
+
     /* ---- html export: tables + tasks ---- */
     hl = md_to_html(tbl, lstrlenW(tbl), &html);
     expect(hl > 0 && html != NULL, "html: generated");
@@ -329,6 +401,50 @@ int main(void)
     expect(bqOpen == 2 && bqClose == 2 && hInner,
            "html: nested blockquote nesting");
     free(html);
+
+    /* ---- share export: local image embedded as data uri ---- */
+    {
+        /* minimal 1x1 png */
+        static const char PNG[] = {
+            (char)0x89,'P','N','G',(char)0x0D,(char)0x0A,(char)0x1A,(char)0x0A,
+            0,0,0,(char)0x0D,'I','H','D','R',0,0,0,1,0,0,0,1,8,6,0,0,0,
+            (char)0x1F,(char)0x15,(char)0xC4,(char)0x89,0,0,0,(char)0x0A,
+            'I','D','A','T',(char)0x78,(char)0x9C,(char)0x63,0,1,0,0,5,0,1,
+            (char)0x0D,(char)0x0A,(char)0x2D,(char)0xB4,0,0,0,0,'I','E','N','D',
+            (char)0xAE,(char)0x42,(char)0x60,(char)0x82
+        };
+        wchar_t tmpDir[MAX_PATH];
+        GetTempPathW(MAX_PATH, tmpDir);
+        wchar_t pngPath[MAX_PATH], mdPath[MAX_PATH];
+        wsprintfW(pngPath, L"%smdl_test.png", tmpDir);
+        wsprintfW(mdPath, L"%smdl_test.md", tmpDir);
+        HANDLE h = CreateFileW(pngPath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            WriteFile(h, PNG, sizeof(PNG), &w, NULL);
+            CloseHandle(h);
+        }
+        const wchar_t *shareMd =
+            L"![本地图片](mdl_test.png) ![远程](https://x/y.png)\n";
+        html = NULL;
+        hl = md_to_html_standalone(shareMd, lstrlenW(shareMd), tmpDir, &html);
+        int hasData = 0, hasRemote = 0;
+        if (html) {
+            for (int i = 0; i + 20 < hl; i++) {
+                if (!strncmp(html + i, "src=\"data:image/png;base64,", 27))
+                    hasData = 1;
+                if (!strncmp(html + i, "src=\"https://x/y.png\"", 21))
+                    hasRemote = 1;
+            }
+        }
+        expect(hl > 0 && html != NULL && hasData,
+               "share html: local image inlined as data uri");
+        expect(hasRemote, "share html: remote url kept as-is");
+        free(html);
+        DeleteFileW(pngPath);
+        (void)mdPath;
+    }
 
     /* ---- editor logic: list continuation ---- */
     {

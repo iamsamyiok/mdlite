@@ -38,12 +38,17 @@
 #define IDM_PRINT      1018
 #define IDM_EXPORTTXT  1019
 #define IDM_AI_MENU    1020
+#define IDM_INSERT_AT  1022
+#define IDM_SHAREHTML  1023
+#define IDM_TREEBAR    1024
+#define IDM_LINKS      1025
 #define IDM_MRU_BASE   2000   /* + index, up to 2009 */
 
 /* view states */
 #define VIEW_EDIT    0
 #define VIEW_SPLIT   1
 #define VIEW_PREVIEW 2
+#define VIEW_GRAPH   3
 
 /* timers / hotkey ids */
 #define TIMER_AUTO   2
@@ -61,6 +66,11 @@ extern wchar_t g_path[MAX_PATH];
 extern wchar_t g_name[MAX_PATH];
 extern HFONT  g_fontHeader;
 extern int    text_w(HDC hdc, HFONT font, const wchar_t *s, int len);
+extern int    HeaderH(void);   /* main.c: header strip height (px) */
+extern int    StatusH(void);   /* main.c: status bar height (px) */
+extern BOOL   FindBarActive(void); /* main.c: find bar visible */
+BOOL LoadFile(const wchar_t *path);      /* main.c */
+BOOL ConfirmDiscard(void);               /* main.c */
 
 static inline int SC(int px) { return MulDiv(px, g_dpi, 96); }
 
@@ -89,6 +99,7 @@ extern BOOL   g_indentRet;      /* Enter inherits leading blanks (main.c) */
 void  StartAi(const wchar_t *question);
 void  ShowSelAiMenu(void);
 void  StartAgent(const wchar_t *task);
+void  ShowInsertMenu(void);   /* main.c: @ snippet popup */
 void  AiCancel(void);
 void  AgCancel(void);
 void  AiFlushPending(void);
@@ -124,7 +135,18 @@ void  GitArchive(const char *u8, int u8len, BOOL isAuto);
 char *BuildHtml(int *outLen);          /* malloc'd UTF-8 html */
 void  CopyHtml(void);
 void  ExportHtml(void);
+void  ExportShareHtml(void);           /* self-contained html, images inlined */
 void  DoPlainExport(void);
 void  DoPrint(void);
+
+/* ---- graph.c ---- */
+void GraphBuild(void);
+void GraphDraw(HDC dc, const RECT *rc);
+int  GraphHitTest(int px, int py, const RECT *rc);
+BOOL GraphDragStart(int px, int py, const RECT *rc);
+void GraphDragMove(int px, int py);
+void GraphDragEnd(void);
+void GraphZoomBy(int deltaUnits);
+void GraphResetView(void);
 
 #endif /* MDLITE_H */

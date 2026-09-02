@@ -13,7 +13,8 @@ enum {
     RF_LINK   = 16,  /* link text, colored + underlined */
     RF_IMAGE  = 32,  /* image alt text, italic gray */
     RF_HL     = 64,  /* ==highlight== */
-    RF_SUP    = 128  /* superscript (footnote refs) */
+    RF_SUP    = 128, /* superscript (footnote refs) */
+    RF_WIKILINK = 256 /* [[target]] internal link between notes */
 };
 
 /* block line types */
@@ -121,6 +122,11 @@ void md_free(MDDoc *doc);
  * returns byte length; *out is malloc'd, caller frees. 0 on error. */
 int md_to_html(const wchar_t *src, int srcLen, char **out);
 
+/* like md_to_html, but local images under docPath are inlined as
+ * base64 data URIs (single-file share html). */
+int md_to_html_standalone(const wchar_t *src, int srcLen,
+                          const wchar_t *docPath, char **out);
+
 /* paint visible portion; rc is the target client area.
  * docPath is the directory of the current document (images are resolved
  * relative to it); pass NULL or "" when there is no document path. */
@@ -128,9 +134,10 @@ void md_paint(const MDDoc *doc, HDC hdc, const RECT *rc, int scrollY,
               const MDFonts *f, const wchar_t *docPath);
 
 /* link hit-rect sink: when set, md_paint reports every visible link's
- * client rect + target. Used for clickable links in preview mode. */
+ * client rect + target. Used for clickable links in preview mode.
+ * wiki != 0 means the target is a [[wiki-link]] between notes. */
 typedef void (*MdLinkSink)(void *ctx, RECT rc, const wchar_t *url,
-                           int urlLen);
+                           int urlLen, int wiki);
 void md_set_link_sink(MdLinkSink cb, void *ctx);
 
 /* theme colors (set by main.c, kept here as externs for simplicity) */

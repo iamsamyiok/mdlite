@@ -10,6 +10,8 @@
 #include <shlwapi.h>
 #include "mdlite.h"
 #include "markdown.h"
+#include "tree.h"
+#include "graph.h"
 #include <stdlib.h>
 #include <string.h>
 #include <wctype.h>
@@ -49,7 +51,10 @@ wchar_t g_path[MAX_PATH] = L"";
 wchar_t g_name[MAX_PATH] = L"";
 static BOOL   g_dirty;
 
-static int    g_hoverId = -1;   /* header hover: 0 open 1 save 2 history 3 settings 10 seg-edit 11 seg-split 12 seg-preview */
+static int    g_hoverId = -1;   /* header hover: 0 open 1 save 2 history 3 settings 4 more 5 topmost 10 seg-edit 11 seg-split 12 seg-preview */
+static DWORD  g_graphLastClickTick = 0;
+static int    g_graphLastClickIdx  = -1;
+static BOOL   g_graphDragging      = FALSE;
 
 /* zoom levels (percent), cycled with Ctrl+wheel */
 static const int ZOOMS[5] = { 85, 100, 115, 130, 150 };
@@ -115,8 +120,11 @@ static int    g_stLen = -1;      /* editor length when words last counted */
 int    g_stBusySec = -1;  /* busy seconds last drawn */
 
 
-static int HeaderH(void) { return SC(48); }
-static int StatusH(void) { return SC(26); }
+int HeaderH(void) { return SC(48); }
+int StatusH(void) { return SC(26); }
+
+/* tree.c needs the find-bar state to align its top edge */
+BOOL FindBarActive(void) { return g_findShown; }
 
 int text_w(HDC hdc, HFONT font, const wchar_t *s, int len);
 static void SaveSettings(void);
@@ -127,7 +135,6 @@ static void MruLoad(void);
 static void MruSave(void);
 static void MruRemove(int idx);
 static void MruPush(const wchar_t *path);
-static BOOL ConfirmDiscard(void);
 void DoPlainExport(void);
 void DoPrint(void);
 static void SetTopmost(BOOL on);
@@ -147,6 +154,8 @@ static void GetBodyRect(RECT *rc)
     GetClientRect(g_hwnd, rc);
     rc->top += HeaderH() + (g_findShown ? SC(40) : 0);
     rc->bottom -= StatusH();
+    if (TreeShown()) rc->left += TreeWidth();
+    /* graph view ignores tree sidebar (it uses the full body area) */
 }
 
 /* ------------------------------------------------------------------ */
@@ -325,6 +334,7 @@ static void SetPath(const wchar_t *path)
         g_path[0] = 0;
         g_name[0] = 0;
     }
+    TreeSync(path);   /* workspace follows the current document */
 }
 
 /* ---- external modification watch (item 30) ---- */
@@ -345,7 +355,7 @@ static void ExtMark(void)
     g_extValid = TRUE;
 }
 
-static BOOL LoadFile(const wchar_t *path)
+BOOL LoadFile(const wchar_t *path)   /* public: tree.c opens files too */
 {
     /* normalize to an absolute path so the git snapshot dir resolves */
     wchar_t full[MAX_PATH];
@@ -456,13 +466,14 @@ static BOOL PromptSaveAs(wchar_t *buf, int cch)
 }
 
 
-/* ---- window topmost toggle (item 45) ---- */
+/* ---- window topmost toggle (header button 5) ---- */
 
 static void SetTopmost(BOOL on)
 {
     g_topmost = on;
     SetWindowPos(g_hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST,
                  0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    InvalidateRect(g_hwnd, NULL, FALSE);   /* repaint the pin toggle */
 }
 
 
@@ -476,9 +487,15 @@ static void ShowHelp(void)
         L"查找：Ctrl+F，替换：Ctrl+H。\r\n"
         L"  Enter 查找下一个 · Shift+Enter 上一个\r\n"
         L"  替换框 Enter 替换当前 · Ctrl+Enter 全部替换 · Esc 关闭。\r\n"
-        L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
+         L"大纲：Ctrl+P 弹出标题列表，输入过滤，Enter 跳转，Esc 关闭。\r\n"
+         L"文件树：Ctrl+B 切换左侧工作区文件列表；Enter 打开，双击目录展开/折叠，Esc 关闭。\r\n"
+         L"链接：Ctrl+Shift+L 弹出反向链接与孤儿笔记面板；双击条目跳转，Esc 关闭。\r\n"
+         L"知识图谱：Ctrl+G 进入全库链接图视图；滚轮缩放、拖拽节点、单击选中高亮、双击跳转并退出，ESC 返回。\r\n"
         L"AI：行首输入 /问题 后回车发送（OpenAI 兼容接口），Esc 中断。\r\n"
         L"Agent：行首输入 //任务 后回车，调用 opencode 在文档目录执行，Esc 终止；超时秒数可在设置中调整。\r\n"
+        L"插入：编辑器按 @ 弹出 Markdown 片段菜单，输入过滤、Enter 插入、Esc 关闭。\r\n"
+        L"置顶：标题栏「置顶」按钮切换窗口总在最前。\r\n"
+        L"分享：更多菜单可导出自包含 HTML（图片内嵌），单文件发任意设备浏览器可看。\r\n"
         L"历史：点「历史」查看版本，点击恢复；行右侧 ✕ 删除单条；上限在设置中调整。\r\n"
         L"自动保存：设置中可配间隔（秒，0=关闭），默认 60 秒。\r\n"
         L"HTML：更多菜单可复制 / 导出 HTML，与预览同款渲染。\r\n"
@@ -494,9 +511,11 @@ static void ShowMoreMenu(void)
 {
     HMENU pm = CreatePopupMenu();
     AppendMenuW(pm, MF_STRING, IDM_OUTLINE,    L"大纲\tCtrl+P");
+    AppendMenuW(pm, MF_STRING, IDM_LINKS,      L"反向链接与孤儿笔记\tCtrl+Shift+L");
     AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     AppendMenuW(pm, MF_STRING, IDM_COPYHTML,   L"复制为 HTML");
     AppendMenuW(pm, MF_STRING, IDM_EXPORTHTML, L"导出 HTML…");
+    AppendMenuW(pm, MF_STRING, IDM_SHAREHTML,  L"导出分享 HTML（内嵌图片）…");
     AppendMenuW(pm, MF_STRING, IDM_EXPORTTXT,  L"导出纯文本…");
     AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     if (g_mruN > 0) {
@@ -518,8 +537,6 @@ static void ShowMoreMenu(void)
         AppendMenuW(pm, MF_POPUP, (UINT_PTR)sub, L"最近文件");
         AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     }
-    AppendMenuW(pm, MF_STRING | (g_topmost ? MF_CHECKED : 0),
-                IDM_TOPMOST, L"窗口置顶");
     AppendMenuW(pm, MF_STRING, IDM_PRINT,      L"打印 / 导出 PDF…");
     AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
     AppendMenuW(pm, MF_STRING, IDM_HELP,       L"帮助");
@@ -592,7 +609,7 @@ static BOOL DoSave(void)
     return ok;
 }
 
-static BOOL ConfirmDiscard(void)
+BOOL ConfirmDiscard(void)   /* public: tree.c checks before opening */
 {
     if (!g_dirty) return TRUE;
     int r = MessageBoxW(g_hwnd, L"文档已修改，是否保存更改？", APP_NAME,
@@ -641,6 +658,18 @@ static void UpdateScroll(void)
 void SetView(int v)
 {
     if (v == g_view) return;
+    if (v == VIEW_GRAPH) {
+        g_preview = FALSE;
+        g_view = VIEW_GRAPH;
+        md_free(&g_doc);
+        ShowWindow(g_edit, SW_HIDE);
+        ShowScrollBar(g_hwnd, SB_VERT, FALSE);
+        GraphBuild();
+        GraphResetView();
+        LayoutChildren();
+        InvalidateRect(g_hwnd, NULL, TRUE);
+        return;
+    }
     if (v == VIEW_EDIT) {
         g_preview = FALSE;
         g_view = VIEW_EDIT;
@@ -738,9 +767,23 @@ static void ApplyZoom(int dir)
 /* header widgets                                                      */
 /* ------------------------------------------------------------------ */
 
-static RECT BtnRect(int id) /* 0 open 1 save 2 history 3 settings 4 more */
+static RECT BtnRect(int id) /* 0 open 1 save 2 history 3 settings 4 more 5 topmost 6 files */
 {
     RECT rc;
+    if (id == 6) {                 /* narrow tree toggle right of topmost */
+        rc.left = SC(14) + 5 * (SC(64) + SC(8)) + SC(48) + SC(8);
+        rc.top = SC(10);
+        rc.right = rc.left + SC(48);
+        rc.bottom = rc.top + SC(28);
+        return rc;
+    }
+    if (id == 5) {                 /* narrow pin toggle right of "more" */
+        rc.left = SC(14) + 5 * (SC(64) + SC(8));
+        rc.top = SC(10);
+        rc.right = rc.left + SC(48);
+        rc.bottom = rc.top + SC(28);
+        return rc;
+    }
     rc.left = SC(14) + id * (SC(64) + SC(8));
     rc.top = SC(10);
     rc.right = rc.left + SC(64);
@@ -765,7 +808,7 @@ static int HitTestHeader(POINT pt)
 {
     POINT p = pt;
     if (p.y < 0 || p.y > HeaderH()) return -1;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         RECT r = BtnRect(i);
         if (PtInRect(&r, p)) return i;
     }
@@ -1630,6 +1673,50 @@ static void DrawHeader(HDC dc, RECT *rcClient)
         SelectObject(dc, old);
     }
 
+    /* topmost toggle - accent-styled while active */
+    {
+        static const wchar_t *pin = L"置顶";
+        RECT r = BtnRect(5);
+        int hot = (g_hoverId == 5);
+        int on = g_topmost;
+        DrawRoundRect(dc, &r, SC(14),
+                      on ? RGB(0xE3, 0xEE, 0xFF)
+                         : (hot ? COL_BTNHVR : RGB(255,255,255)),
+                      on ? COL_ACCENT : COL_BTNBRD, 1);
+        HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
+        SetTextColor(dc, on ? COL_ACCENT : COL_BTNTXT);
+        SetBkMode(dc, TRANSPARENT);
+        int tx = r.left + (r.right - r.left) / 2
+                 - text_w(dc, g_fontHeader, pin, lstrlenW(pin)) / 2;
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
+        TextOutW(dc, tx, ty, pin, lstrlenW(pin));
+        SelectObject(dc, old);
+    }
+
+    /* file-tree toggle - accent-styled while shown */
+    {
+        static const wchar_t *fl = L"文件";
+        RECT r = BtnRect(6);
+        int hot = (g_hoverId == 6);
+        int on = TreeShown();
+        DrawRoundRect(dc, &r, SC(14),
+                      on ? RGB(0xE3, 0xEE, 0xFF)
+                         : (hot ? COL_BTNHVR : RGB(255,255,255)),
+                      on ? COL_ACCENT : COL_BTNBRD, 1);
+        HFONT old = (HFONT)SelectObject(dc, g_fontHeader);
+        SetTextColor(dc, on ? COL_ACCENT : COL_BTNTXT);
+        SetBkMode(dc, TRANSPARENT);
+        int tx = r.left + (r.right - r.left) / 2
+                 - text_w(dc, g_fontHeader, fl, lstrlenW(fl)) / 2;
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        int ty = r.top + (r.bottom - r.top - tm.tmHeight) / 2;
+        TextOutW(dc, tx, ty, fl, lstrlenW(fl));
+        SelectObject(dc, old);
+    }
+
     /* segment switch - capsule, three segments */
     {
         RECT s = SegRect();
@@ -2224,6 +2311,394 @@ static void HideOutline(void)
     SetFocus(g_edit);
 }
 
+/* ------------------------------------------------------------------ */
+/* links panel: backlinks of the current note + orphan notes           */
+/* ------------------------------------------------------------------ */
+
+static void HideLinks(void);
+
+static HWND    g_lkWnd, g_lkList;
+static WNDPROC g_lkListProc;
+static wchar_t (*g_lkPaths)[MAX_PATH];
+static int     g_lkN;      /* file entries stored (headers not counted) */
+static int     g_lkBackN;  /* backlink entries before the orphan ones */
+
+static void LinksJump(void)
+{
+    int sel = (int)SendMessageW(g_lkList, LB_GETCURSEL, 0, 0);
+    if (sel < 0 || !g_lkPaths) return;
+    /* header rows: index 0 and the one right after the backlinks */
+    if (sel == 0 || sel == g_lkBackN + 1) return;
+    int pi = sel <= g_lkBackN ? sel - 1 : sel - 2;
+    if (pi < 0 || pi >= g_lkN) return;
+    wchar_t path[MAX_PATH];
+    lstrcpynW(path, g_lkPaths[pi], MAX_PATH);
+    HideLinks();
+    LoadFile(path);
+}
+
+static LRESULT CALLBACK LkListProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN) {
+        if (wp == VK_RETURN) { LinksJump(); return 0; }
+        if (wp == VK_ESCAPE) { HideLinks(); return 0; }
+    }
+    if (msg == WM_KILLFOCUS) {
+        if ((HWND)wp != g_lkWnd && (HWND)wp != g_lkList)
+            PostMessageW(g_hwnd, WM_EDITCMD, IDM_LINKS, 0);
+        return 0;
+    }
+    return CallWindowProcW(g_lkListProc, h, msg, wp, lp);
+}
+
+static LRESULT CALLBACK LinksProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND:
+        if (HIWORD(wp) == LBN_DBLCLK && (HWND)lp == g_lkList) {
+            LinksJump();
+            return 0;
+        }
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { HideLinks(); return 0; }
+        break;
+    case WM_KILLFOCUS:
+        if (GetFocus() != g_lkList) HideLinks();
+        return 0;
+    case WM_NCDESTROY:
+        g_lkWnd = NULL;
+        g_lkList = NULL;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+/* base name of a path, for list display */
+static const wchar_t *BaseNameOf(const wchar_t *path)
+{
+    const wchar_t *b = path;
+    for (const wchar_t *p = path; *p; p++)
+        if (*p == L'\\' || *p == L'/') b = p + 1;
+    return b;
+}
+
+static void LinksFill(void)
+{
+    free(g_lkPaths);
+    g_lkPaths = NULL;
+    g_lkN = 0;
+    g_lkBackN = 0;
+    SendMessageW(g_lkList, LB_RESETCONTENT, 0, 0);
+
+    TreeScanLinks();
+
+    wchar_t (*bl)[MAX_PATH] = NULL;
+    int nb = TreeBacklinks(g_path, &bl);
+    wchar_t (*orph)[MAX_PATH] = NULL;
+    int no = TreeOrphans(&orph);
+
+    if (nb + no > 0)
+        g_lkPaths = (wchar_t (*)[MAX_PATH])malloc(
+            (nb + no) * sizeof(*g_lkPaths));
+
+    wchar_t hdr[96];
+    wsprintfW(hdr, L"── 反向链接（%d）──", nb);
+    SendMessageW(g_lkList, LB_ADDSTRING, 0, (LPARAM)hdr);
+    for (int i = 0; i < nb; i++) {
+        if (!g_lkPaths) break;
+        lstrcpynW(g_lkPaths[g_lkN++], bl[i], MAX_PATH);
+        SendMessageW(g_lkList, LB_ADDSTRING, 0,
+                     (LPARAM)BaseNameOf(bl[i]));
+    }
+    g_lkBackN = g_lkN;
+
+    wsprintfW(hdr, L"── 孤儿笔记（%d）──", no);
+    SendMessageW(g_lkList, LB_ADDSTRING, 0, (LPARAM)hdr);
+    for (int i = 0; i < no; i++) {
+        if (!g_lkPaths) break;
+        lstrcpynW(g_lkPaths[g_lkN++], orph[i], MAX_PATH);
+        SendMessageW(g_lkList, LB_ADDSTRING, 0,
+                     (LPARAM)BaseNameOf(orph[i]));
+    }
+    free(bl);
+    free(orph);
+}
+
+static void ShowLinks(void)
+{
+    if (g_lkWnd) { SetFocus(g_lkList); return; }
+    if (!g_path[0]) {
+        MessageBoxW(g_hwnd,
+            L"当前文档尚未保存到磁盘，暂无反向链接。",
+            APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASSW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc = LinksProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"MDLiteLinks";
+        if (!RegisterClassW(&wc)) return;
+        registered = TRUE;
+    }
+    RECT rcMain;
+    GetWindowRect(g_hwnd, &rcMain);
+    int w = SC(400), h = SC(440);
+    int x = rcMain.left + (rcMain.right - rcMain.left - w) / 2;
+    int y = rcMain.top + HeaderH() + SC(56);
+    g_lkWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"MDLiteLinks", NULL, WS_POPUP | WS_BORDER,
+        x, y, w, h, g_hwnd, NULL, NULL, NULL);
+    if (!g_lkWnd) return;
+
+    g_lkList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
+        SC(10), SC(10), w - SC(20), h - SC(20), g_lkWnd, (HMENU)1,
+        NULL, NULL);
+    g_lkListProc = (WNDPROC)SetWindowLongPtrW(g_lkList, GWLP_WNDPROC,
+                                              (LONG_PTR)LkListProc);
+    SendMessageW(g_lkList, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+
+    LinksFill();
+    ShowWindow(g_lkWnd, SW_SHOW);
+    SetFocus(g_lkList);
+}
+
+static void HideLinks(void)
+{
+    if (g_lkWnd) DestroyWindow(g_lkWnd);
+    free(g_lkPaths);
+    g_lkPaths = NULL;
+    SetFocus(g_edit);
+}
+
+/* ------------------------------------------------------------------ */
+/* insert menu (@): filter + insert markdown snippets                  */
+/* ------------------------------------------------------------------ */
+
+static void HideInsertMenu(void);
+
+typedef struct {
+    const wchar_t *label;
+    const wchar_t *before;   /* prefix inserted before the caret */
+    const wchar_t *sel;      /* inserted selected, ready to overtype */
+    const wchar_t *after;    /* suffix inserted after the selection */
+} InsItem;
+
+static const InsItem INS_ITEMS[] = {
+    { L"二级标题", L"\r\n## ", L"标题", L"" },
+    { L"三级标题", L"\r\n### ", L"标题", L"" },
+    { L"无序列表", L"\r\n", L"- 列表项", L"" },
+    { L"有序列表", L"\r\n", L"1. 列表项", L"" },
+    { L"任务列表", L"\r\n", L"- [ ] 任务", L"" },
+    { L"引用块",   L"\r\n", L"> 引用内容", L"" },
+    { L"表格",     L"\r\n",
+      L"| 列一 | 列二 |\r\n| --- | --- |\r\n| 内容 | 内容 |", L"" },
+    { L"代码块",   L"\r\n```\r\n", L"代码", L"\r\n```" },
+    { L"行内代码", L"`", L"代码", L"`" },
+    { L"粗体",     L"**", L"粗体文本", L"**" },
+    { L"斜体",     L"*", L"斜体文本", L"*" },
+    { L"删除线",   L"~~", L"删除文本", L"~~" },
+    { L"高亮",     L"==", L"高亮文本", L"==" },
+    { L"链接",     L"[", L"链接文字", L"](https://example.com)" },
+    { L"图片",     L"![", L"图片说明", L"](image.png)" },
+    { L"脚注",     L"[^", L"1", L"]" },
+    { L"分隔线",   L"\r\n---\r\n", L"", L"" },
+};
+#define INS_N (int)(sizeof(INS_ITEMS) / sizeof(INS_ITEMS[0]))
+
+static HWND   g_insWnd, g_insFilter, g_insList;
+static WNDPROC g_insFilterProc, g_insListProc;
+static int    g_insVis[INS_N < 32 ? 32 : INS_N];
+static int    g_insVisN;
+
+/* refill the listbox from the filter text */
+static void InsFill(void)
+{
+    wchar_t filter[64];
+    GetWindowTextW(g_insFilter, filter, 64);
+    int fl = lstrlenW(filter);
+    for (int i = 0; i < fl; i++) filter[i] = lowerW(filter[i]);
+
+    SendMessageW(g_insList, LB_RESETCONTENT, 0, 0);
+    g_insVisN = 0;
+    for (int i = 0; i < INS_N; i++) {
+        BOOL ok = (fl == 0);
+        if (!ok) {
+            const wchar_t *lbl = INS_ITEMS[i].label;
+            int ll = lstrlenW(lbl);
+            for (int s = 0; s <= ll - fl && !ok; s++) {
+                int k = 0;
+                while (k < fl && lowerW(lbl[s + k]) == filter[k]) k++;
+                if (k == fl) ok = TRUE;
+            }
+        }
+        if (ok) {
+            SendMessageW(g_insList, LB_ADDSTRING, 0,
+                         (LPARAM)INS_ITEMS[i].label);
+            g_insVis[g_insVisN++] = i;
+        }
+    }
+    if (g_insVisN > 0) SendMessageW(g_insList, LB_SETCURSEL, 0, 0);
+}
+
+/* insert the selected snippet at the edit caret (replacing any selection) */
+static void InsApply(void)
+{
+    int sel = (int)SendMessageW(g_insList, LB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= g_insVisN) return;
+    const InsItem *it = &INS_ITEMS[g_insVis[sel]];
+
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    /* block snippets start with CRLF so they land on their own line;
+     * drop it when the caret already sits at line start */
+    int lead = 0;
+    if (it->before[0] == L'\r') {
+        int li = (int)SendMessageW(g_edit, EM_LINEFROMCHAR, s0, 0);
+        if ((int)SendMessageW(g_edit, EM_LINEINDEX, li, 0) == (int)s0)
+            lead = 2;
+    }
+
+    wchar_t buf[512];
+    int n = 0;
+    const wchar_t *parts[3] = { it->before, it->sel, it->after };
+    for (int p = 0; p < 3; p++)
+        for (const wchar_t *q = parts[p]; *q && n < 510; q++)
+            buf[n++] = *q;
+    buf[n] = 0;
+
+    HideInsertMenu();
+    SendMessageW(g_edit, EM_REPLACESEL, TRUE, (LPARAM)(buf + lead));
+    int start = (int)s0 + lstrlenW(it->before) - lead;
+    int selLen = lstrlenW(it->sel);
+    if (start < 0) start = 0;
+    SendMessageW(g_edit, EM_SETSEL, start, start + selLen);
+    SendMessageW(g_edit, EM_SCROLLCARET, 0, 0);
+    SetFocus(g_edit);
+}
+
+static LRESULT CALLBACK InsFilterProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN) {
+        if (wp == VK_DOWN && g_insVisN > 0) {
+            int cur = (int)SendMessageW(g_insList, LB_GETCURSEL, 0, 0);
+            if (cur < 0) cur = 0;
+            if (cur + 1 < g_insVisN)
+                SendMessageW(g_insList, LB_SETCURSEL, cur + 1, 0);
+            return 0;
+        }
+        if (wp == VK_RETURN) { InsApply(); return 0; }
+        if (wp == VK_ESCAPE) { HideInsertMenu(); return 0; }
+    }
+    if (msg == WM_KILLFOCUS) {
+        HWND nf = (HWND)wp;
+        if (nf != g_insWnd && nf != g_insFilter && nf != g_insList)
+            HideInsertMenu();
+        return 0;
+    }
+    return CallWindowProcW(g_insFilterProc, h, msg, wp, lp);
+}
+
+static LRESULT CALLBACK InsListProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN) {
+        if (wp == VK_RETURN) { InsApply(); return 0; }
+        if (wp == VK_ESCAPE) { HideInsertMenu(); return 0; }
+    }
+    if (msg == WM_KILLFOCUS) {
+        HWND nf = (HWND)wp;
+        if (nf != g_insWnd && nf != g_insFilter && nf != g_insList)
+            HideInsertMenu();
+        return 0;
+    }
+    return CallWindowProcW(g_insListProc, h, msg, wp, lp);
+}
+
+static LRESULT CALLBACK InsertProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND:
+        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_insFilter) {
+            InsFill();
+            return 0;
+        }
+        if (HIWORD(wp) == LBN_DBLCLK && (HWND)lp == g_insList) {
+            InsApply();
+            return 0;
+        }
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { HideInsertMenu(); return 0; }
+        break;
+    case WM_KILLFOCUS:
+        if (GetFocus() != g_insFilter && GetFocus() != g_insList)
+            HideInsertMenu();
+        return 0;
+    case WM_NCDESTROY:
+        g_insWnd = NULL;
+        g_insFilter = NULL;
+        g_insList = NULL;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+void ShowInsertMenu(void)
+{
+    if (g_insWnd) { SetFocus(g_insFilter); return; }
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASSW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc = InsertProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"MDLiteInsert";
+        if (!RegisterClassW(&wc)) return;
+        registered = TRUE;
+    }
+    RECT rcMain;
+    GetWindowRect(g_hwnd, &rcMain);
+    int w = SC(300), h = SC(320);
+    int x = rcMain.left + (rcMain.right - rcMain.left - w) / 2;
+    int y = rcMain.top + HeaderH() + SC(56);
+    g_insWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"MDLiteInsert", NULL, WS_POPUP | WS_BORDER,
+        x, y, w, h, g_hwnd, NULL, NULL, NULL);
+    if (!g_insWnd) return;
+
+    g_insFilter = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        SC(10), SC(10), w - SC(20), SC(26), g_insWnd, (HMENU)1, NULL, NULL);
+    g_insFilterProc = (WNDPROC)SetWindowLongPtrW(g_insFilter, GWLP_WNDPROC,
+                                                 (LONG_PTR)InsFilterProc);
+    SendMessageW(g_insFilter, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+
+    g_insList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
+        SC(10), SC(44), w - SC(20), h - SC(54), g_insWnd, (HMENU)2, NULL, NULL);
+    g_insListProc = (WNDPROC)SetWindowLongPtrW(g_insList, GWLP_WNDPROC,
+                                               (LONG_PTR)InsListProc);
+    SendMessageW(g_insList, WM_SETFONT, (WPARAM)g_fontHeader, TRUE);
+
+    InsFill();
+    ShowWindow(g_insWnd, SW_SHOW);
+    SetFocus(g_insFilter);
+}
+
+static void HideInsertMenu(void)
+{
+    if (g_insWnd) DestroyWindow(g_insWnd);
+    SetFocus(g_edit);
+}
+
 static LRESULT CALLBACK FindProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_KEYDOWN) {
@@ -2296,10 +2771,11 @@ static void DrawFindBar(HDC dc, RECT *rcClient)
 
 /* clickable links in preview (item 49) */
 #define LINK_MAX 256
-static struct { RECT rc; wchar_t url[520]; } g_links[LINK_MAX];
+static struct { RECT rc; wchar_t url[520]; int wiki; } g_links[LINK_MAX];
 static int g_linkN;
 
-static void LinkSink(void *ctx, RECT rc, const wchar_t *url, int urlLen)
+static void LinkSink(void *ctx, RECT rc, const wchar_t *url, int urlLen,
+                     int wiki)
 {
     (void)ctx;
     if (g_linkN >= LINK_MAX) return;
@@ -2307,6 +2783,7 @@ static void LinkSink(void *ctx, RECT rc, const wchar_t *url, int urlLen)
     for (int i = 0; i < n; i++) g_links[g_linkN].url[i] = url[i];
     g_links[g_linkN].url[n] = 0;
     g_links[g_linkN].rc = rc;
+    g_links[g_linkN].wiki = wiki;
     g_linkN++;
 }
 
@@ -2319,9 +2796,52 @@ static int HitLink(int px, int py)
     return -1;
 }
 
+/* open a [[wiki-link]]: resolve to a workspace file; offer to create
+ * the note when nothing matches */
+static void OpenWikiLink(const wchar_t *target)
+{
+    wchar_t path[MAX_PATH];
+    if (TreeJumpResolve(g_path, target, path, MAX_PATH)) {
+        LoadFile(path);
+        return;
+    }
+    wchar_t msg[600];
+    wsprintfW(msg, L"笔记「%s」不存在。\n\n现在创建它吗？", target);
+    if (MessageBoxW(g_hwnd, msg, APP_NAME,
+                    MB_ICONQUESTION | MB_YESNO) != IDYES)
+        return;
+    /* create next to the current document: save current, then start a
+     * new document pre-set to the target path */
+    wchar_t dir[MAX_PATH];
+    dir[0] = 0;
+    if (g_path[0]) {
+        lstrcpynW(dir, g_path, MAX_PATH);
+        wchar_t *slash = wcsrchr(dir, L'\\');
+        if (slash) *slash = 0;
+    }
+    wchar_t newp[MAX_PATH];
+    if (dir[0]) {
+        wsprintfW(newp, L"%s\\%s.md", dir, target);
+        SetPath(newp);
+    } else {
+        SetPath(L"");
+    }
+    SetWindowTextW(g_edit, L"");
+    SendMessageW(g_edit, EM_SETMODIFY, FALSE, 0);
+    g_dirty = FALSE;
+    if (dir[0])
+        MessageBoxW(g_hwnd,
+            L"已就绪：写入内容后按 Ctrl+S 保存到该文件。",
+            APP_NAME, MB_ICONINFORMATION);
+}
+
 static void OpenLink(int i)
 {
     if (i < 0 || i >= g_linkN) return;
+    if (g_links[i].wiki) {
+        OpenWikiLink(g_links[i].url);
+        return;
+    }
     HINSTANCE r = ShellExecuteW(g_hwnd, L"open", g_links[i].url,
                                 NULL, NULL, SW_SHOWNORMAL);
     if ((INT_PTR)r <= 32) {
@@ -2472,7 +2992,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             FillRect(mem, &rcBody, (HBRUSH)GetStockObject(WHITE_BRUSH));
         }
         DrawHeader(mem, &rcClient);
-        if (g_findShown) DrawFindBar(mem, &rcClient);
+        if (g_view == VIEW_GRAPH) {
+            /* graph view uses the full body area */
+            RECT rcG = rcBody;
+            GraphDraw(mem, &rcG);
+        } else {
+            TreeDraw(mem, &rcClient);
+            if (g_findShown) DrawFindBar(mem, &rcClient);
+        }
         DrawStatus(mem, &rcClient);
 
         BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
@@ -2511,7 +3038,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case IDM_NEW:      DoNew();                 return 0;
-        case IDM_TOGGLE:   SetView((g_view + 1) % 3); return 0;
+        case IDM_TOGGLE:   SetView((g_view + 1) % 4); return 0;
         case IDM_FIND:     ShowFindBar(FALSE);      return 0;
         case IDM_REPLACE:  ShowFindBar(TRUE);       return 0;
         case IDM_FINDNEXT: DoFind(1);               return 0;
@@ -2524,11 +3051,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDM_COPYHTML:   CopyHtml();            return 0;
         case IDM_EXPORTHTML: ExportHtml();          return 0;
+        case IDM_SHAREHTML:  ExportShareHtml();     return 0;
         case IDM_EXPORTTXT:  DoPlainExport();       return 0;
         case IDM_PRINT:      DoPrint();             return 0;
         case IDM_TOPMOST:
             SetTopmost(!g_topmost);
             SaveSettings();
+            return 0;
+        case IDM_TREEBAR:
+            TreeToggle();
+            SaveSettings();
+            return 0;
+        case IDM_LINKS:
+            if (g_lkWnd) HideLinks();
+            else ShowLinks();
             return 0;
         case IDM_HELP:       ShowHelp();            return 0;
         }
@@ -2539,6 +3075,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == 'S') { SendMessageW(hwnd, WM_EDITCMD, IDM_SAVE, 0); return 0; }
             if (wp == 'O') { SendMessageW(hwnd, WM_EDITCMD, IDM_OPEN, 0); return 0; }
             if (wp == 'N') { SendMessageW(hwnd, WM_EDITCMD, IDM_NEW, 0);  return 0; }
+            if (wp == 'B') { SendMessageW(hwnd, WM_EDITCMD, IDM_TREEBAR, 0); return 0; }
+            if (wp == 'G') { SendMessageW(hwnd, WM_EDITCMD, IDM_TOGGLE, 0); return 0; }
+            if (wp == 'L' && (GetKeyState(VK_SHIFT) & 0x8000)) {
+                SendMessageW(hwnd, WM_EDITCMD, IDM_LINKS, 0); return 0;
+            }
             if (wp == 'F') { SendMessageW(hwnd, WM_EDITCMD, IDM_FIND, 0); return 0; }
             if (wp == 'H') { SendMessageW(hwnd, WM_EDITCMD, IDM_REPLACE, 0); return 0; }
             if (wp == VK_OEM_COMMA) { SendMessageW(hwnd, WM_EDITCMD, IDM_SETTINGS, 0); return 0; }
@@ -2560,11 +3101,50 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
         }
+        if (g_view == VIEW_GRAPH && wp == VK_ESCAPE) {
+            SetView(VIEW_EDIT);
+            return 0;
+        }
         break;
 
     case WM_LBUTTONDOWN: {
         int px = (short)LOWORD(lp);
         int py = (short)HIWORD(lp);
+        /* the file tree owns clicks inside its strip */
+        if (TreeClick((POINT){ px, py })) return 0;
+        if (g_view == VIEW_GRAPH) {
+            RECT rcBody;
+            GetBodyRect(&rcBody);
+            int mx = px - rcBody.left, my = py - rcBody.top;
+            int hi = GraphHitTest(mx, my, &rcBody);
+            if (hi >= 0) {
+                if (GraphDragStart(mx, my, &rcBody)) {
+                    g_graphDragging = TRUE;
+                    SetCapture(hwnd);
+                    return 0;
+                }
+                /* detect double-click on node: jump + exit graph */
+                DWORD now = GetTickCount();
+                if (hi == g_graphLastClickIdx
+                    && now - g_graphLastClickTick < GetDoubleClickTime()) {
+                    wchar_t path[MAX_PATH];
+                    if (!GraphNodePath(hi, path, MAX_PATH)) break;
+                    g_graphLastClickTick = 0;
+                    g_graphLastClickIdx = -1;
+                    ReleaseCapture();
+                    GraphDragEnd();
+                    SetView(VIEW_EDIT);
+                    LoadFile(path);
+                    return 0;
+                }
+                g_graphLastClickTick = now;
+                g_graphLastClickIdx  = hi;
+            } else {
+                g_graphLastClickTick = 0;
+                g_graphLastClickIdx  = -1;
+            }
+            return 0;
+        }
         if (g_view == VIEW_PREVIEW || g_view == VIEW_SPLIT) {
             BOOL inPrev = (g_view == VIEW_PREVIEW);
             if (!inPrev) {
@@ -2613,6 +3193,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (id == 2) ShowHistoryMenu();
         else if (id == 3) ShowSettings();
         else if (id == 4) ShowMoreMenu();
+        else if (id == 5) { SetTopmost(!g_topmost); SaveSettings(); }
+        else if (id == 6) { TreeToggle(); SaveSettings(); }
         else if (id >= 10 && id <= 12) SetView(id - 10);
         return 0;
     }
@@ -2622,6 +3204,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
+            if (g_view == VIEW_GRAPH) {
+                RECT rcBody;
+                GetBodyRect(&rcBody);
+                if (GraphHitTest(pt.x - rcBody.left, pt.y - rcBody.top,
+                                 &rcBody) >= 0) {
+                    SetCursor(LoadCursorW(NULL, IDC_HAND));
+                    return TRUE;
+                }
+                return FALSE;
+            }
             if ((g_view == VIEW_PREVIEW || g_view == VIEW_SPLIT)
                 && HitLink(pt.x, pt.y) >= 0) {
                 SetCursor(LoadCursorW(NULL, IDC_HAND));
@@ -2631,6 +3223,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_MOUSEMOVE: {
+        if (g_view == VIEW_GRAPH) {
+            int px = (short)LOWORD(lp);
+            int py = (short)HIWORD(lp);
+            RECT rcBody;
+            GetBodyRect(&rcBody);
+            int mx = px - rcBody.left, my = py - rcBody.top;
+            if (g_graphDragging) {
+                GraphDragMove(mx, my);
+                InvalidateRect(hwnd, &rcBody, FALSE);
+                return 0;
+            }
+            int hi = GraphHitTest(mx, my, &rcBody);
+            if (hi != g_hoverId) {
+                g_hoverId = hi;
+                InvalidateRect(hwnd, &rcBody, FALSE);
+            }
+            return 0;
+        }
         if (g_splitDrag) {
             int py = (short)HIWORD(lp);
             RECT rcPrev;
@@ -2651,7 +3261,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         }
-        int id = HitTestHeader((POINT){ (short)LOWORD(lp), (short)HIWORD(lp) });
+        POINT ptMv = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        TreeMouseMove(ptMv);
+        int id = HitTestHeader(ptMv);
         if (id != g_hoverId) {
             g_hoverId = id;
             InvalidateRect(hwnd, NULL, FALSE);
@@ -2674,6 +3286,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ReleaseCapture();
             InvalidateRect(hwnd, NULL, FALSE);
         }
+        if (g_graphDragging) {
+            g_graphDragging = FALSE;
+            GraphDragEnd();
+            ReleaseCapture();
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
         return 0;
 
     case WM_MOUSELEAVE:
@@ -2681,6 +3299,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_hoverId = -1;
             InvalidateRect(hwnd, NULL, FALSE);
         }
+        TreeMouseMove((POINT){ -1, -1 });   /* clear tree row hover */
         return 0;
 
     case WM_VSCROLL:
@@ -2710,10 +3329,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_MOUSEWHEEL:
+        if (g_view == VIEW_GRAPH) {
+            GraphZoomBy(-((short)HIWORD(wp)) / WHEEL_DELTA);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         if (GetKeyState(VK_CONTROL) & 0x8000) {
             SendMessageW(hwnd, WM_EDITCMD, IDM_ZOOM,
                          ((short)HIWORD(wp) > 0) ? 1 : -1);
             return 0;
+        }
+        {
+            POINT ptWh = { (short)LOWORD(lp), (short)HIWORD(lp) };
+            ScreenToClient(hwnd, &ptWh);
+            if (TreePtIn(ptWh)) {
+                TreeWheel(-((short)HIWORD(wp)) / WHEEL_DELTA * 3);
+                return 0;
+            }
         }
         if (g_view == VIEW_PREVIEW) {
             int step = g_fonts.bodyH + (g_fonts.bodyH >> 1);
@@ -3476,6 +4108,7 @@ static void SaveSettings(void)
     CfgSetDword(L"AgTimeout", (DWORD)g_agTimeout);
     CfgSetDword(L"AiRounds", (DWORD)g_aiRounds);
     CfgSetDword(L"Topmost", (DWORD)(g_topmost ? 1 : 0));
+    CfgSetDword(L"TreeBar", (DWORD)(TreeShown() ? 1 : 0));
     CfgSetDword(L"IndentRet", (DWORD)(g_indentRet ? 1 : 0));
     static const struct { const wchar_t *name; const wchar_t *v; }
     strs[] = { { L"AiBase", g_aiBase }, { L"AiModel", g_aiModel },
@@ -3521,6 +4154,7 @@ static void LoadExtraSettings(void)
     v = CfgGetDword(L"AiRounds", (DWORD)g_aiRounds);
     if (v <= 10) g_aiRounds = (int)v;
     g_topmost = CfgGetDword(L"Topmost", 0) != 0;
+    TreeSetShown(CfgGetDword(L"TreeBar", 0) != 0);
     g_indentRet = CfgGetDword(L"IndentRet", 1) != 0;
     static const struct { const wchar_t *name; wchar_t *v; int cch; }
     strs[] = { { L"AiBase", g_aiBase, 256 }, { L"AiModel", g_aiModel, 128 },

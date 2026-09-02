@@ -6,9 +6,9 @@ LIBS    = -lgdi32 -lcomdlg32 -lshell32 -lshlwapi -luser32 -ladvapi32 -lwinhttp -
 all: MDLite.exe
 
 MDLite.exe: main.c markdown.c markdown.h mdlite.h gitlite.c ai.c editlogic.c \
-            editlogic.h export.c zliblite.c zliblite.h icon.o
+            editlogic.h export.c zliblite.c zliblite.h tree.c tree.h graph.c graph.h icon.o
 	$(CC) $(CFLAGS) main.c markdown.c gitlite.c ai.c editlogic.c export.c \
-	      zliblite.c icon.o -o $@ $(LDFLAGS) $(LIBS)
+	      zliblite.c tree.c graph.c icon.o -o $@ $(LDFLAGS) $(LIBS)
 
 icon.o: icon.rc icon.ico
 	x86_64-w64-mingw32-windres icon.rc -O coff -o $@

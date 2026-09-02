@@ -318,6 +318,34 @@ static void parse_inline(const wchar_t *s, int len, int flags, int depth,
                 matched = 1;
             }
         }
+        else if (c == L'[' && i + 1 < len && s[i+1] == L'[') {
+            /* wiki link [[target]] or [[target|label]] */
+            int j = i + 2;
+            while (j + 1 < len && !(s[j] == L']' && s[j+1] == L']')) j++;
+            if (j + 1 < len && j > i + 2) {
+                const wchar_t *tgt = s + i + 2;
+                int tl = j - i - 2;
+                const wchar_t *txt = tgt;
+                int txtLen = tl;
+                /* split on the first | : [[target|label]] */
+                for (int k = 0; k < tl; k++) {
+                    if (tgt[k] == L'|') {
+                        txtLen = tl - k - 1;
+                        txt = tgt + k + 1;
+                        tl = k;
+                        break;
+                    }
+                }
+                if (tl >= 1 && tl < 260 && txtLen >= 1) {
+                    if (i > 0) push_run(out, s, i, flags, url, urlLen);
+                    push_run(out, txt, txtLen,
+                             flags | RF_LINK | RF_WIKILINK, tgt, tl);
+                    j += 2;
+                    s += j; len -= j; i = 0;
+                    matched = 1;
+                }
+            }
+        }
         else if (c == L'[' && i + 2 < len && s[i+1] == L'^') {
             /* inline footnote reference [^label] */
             int j = i + 2;
@@ -1150,7 +1178,8 @@ static void draw_runs(HDC hdc, const MDSub *sub, int x, int y,
         if ((r->flags & RF_LINK) && g_linkSink && r->url && r->urlLen > 0
             && r->urlLen < 4096) {
             RECT lrc = { x, ry, x + w, ry + tmH };
-            g_linkSink(g_linkCtx, lrc, r->url, r->urlLen);
+            g_linkSink(g_linkCtx, lrc, r->url, r->urlLen,
+                       (r->flags & RF_WIKILINK) != 0);
         }
 
         if (r->flags & RF_CODE) {
@@ -1538,6 +1567,111 @@ static void h_appurl(HtmlOut *o, const wchar_t *s, int len)
     }
 }
 
+/* ---- standalone share export: embed local images as base64 data URIs ----
+ * enabled only while md_to_html_standalone() runs (reuses ReadAllBytes
+ * from gitlite.c so no new file-io code is needed here). */
+extern BOOL ReadAllBytes(const wchar_t *path, char **buf, int *len);
+
+static BOOL g_htmlEmbed = FALSE;
+static wchar_t g_htmlImgDir[MAX_PATH];
+
+/* mime type from the url extension, or NULL when unknown */
+static const char *img_mime(const wchar_t *url, int len)
+{
+    int dot = -1;
+    for (int i = len - 1; i >= 0; i--) {
+        if (url[i] == L'.') { dot = i; break; }
+        if (url[i] == L'/' || url[i] == L'\\') break;
+    }
+    if (dot < 0) return NULL;
+    static const struct { const wchar_t *ext; const char *mime; } TBL[] = {
+        { L"png",  "image/png"  },
+        { L"jpg",  "image/jpeg" },
+        { L"jpeg", "image/jpeg" },
+        { L"gif",  "image/gif"  },
+        { L"bmp",  "image/bmp"  },
+        { L"webp", "image/webp" },
+    };
+    for (int k = 0; k < (int)(sizeof(TBL) / sizeof(TBL[0])); k++) {
+        int ml = lstrlenW(TBL[k].ext);
+        if (len - dot - 1 != ml) continue;
+        BOOL same = TRUE;
+        for (int i = 0; i < ml; i++)
+            if ((wchar_t)towlower((wint_t)url[dot + 1 + i]) != TBL[k].ext[i]) {
+                same = FALSE; break;
+            }
+        if (same) return TBL[k].mime;
+    }
+    return NULL;
+}
+
+/* resolve an image url against g_htmlImgDir; FALSE for remote/anchor/data */
+static BOOL local_img_path(const wchar_t *url, int len, wchar_t *out, int cch)
+{
+    if (len <= 0 || len >= MAX_PATH) return FALSE;
+    for (int i = 0; i + 2 < len; i++)
+        if (url[i] == L':' && url[i + 1] == L'/' && url[i + 2] == L'/')
+            return FALSE;                          /* http(s):// etc. */
+    if (url[0] == L'#') return FALSE;
+    if ((len >= 2 && url[1] == L':')
+        || url[0] == L'\\' || url[0] == L'/') {    /* absolute path */
+        for (int i = 0; i < len && i < cch - 1; i++) out[i] = url[i];
+        out[len < cch - 1 ? len : cch - 1] = 0;
+        return TRUE;
+    }
+    if (!g_htmlImgDir[0]) return FALSE;
+    int dl = lstrlenW(g_htmlImgDir);
+    if (dl + 1 + len >= cch) return FALSE;
+    lstrcpynW(out, g_htmlImgDir, cch);
+    out[dl] = L'\\';
+    for (int i = 0; i < len; i++) out[dl + 1 + i] = url[i];
+    out[dl + 1 + len] = 0;
+    return TRUE;
+}
+
+static void h_app_b64(HtmlOut *o, const char *in, int n)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                            "abcdefghijklmnopqrstuvwxyz0123456789+/";
+    char quad[5];
+    for (int i = 0; i < n; i += 3) {
+        unsigned v = ((unsigned)(unsigned char)in[i]) << 16;
+        if (i + 1 < n) v |= ((unsigned)(unsigned char)in[i + 1]) << 8;
+        if (i + 2 < n) v |= (unsigned)(unsigned char)in[i + 2];
+        quad[0] = T[(v >> 18) & 63];
+        quad[1] = T[(v >> 12) & 63];
+        quad[2] = (i + 1 < n) ? T[(v >> 6) & 63] : '=';
+        quad[3] = (i + 2 < n) ? T[v & 63] : '=';
+        quad[4] = 0;
+        h_app(o, quad);
+    }
+}
+
+/* on success the src="data:..." value is already appended */
+static BOOL h_img_data_uri(HtmlOut *o, const wchar_t *url, int len)
+{
+    const char *mime = img_mime(url, len);
+    if (!mime) return FALSE;
+    wchar_t path[MAX_PATH];
+    if (!local_img_path(url, len, path, MAX_PATH)) return FALSE;
+    char *bytes = NULL;
+    int blen = 0;
+    if (!ReadAllBytes(path, &bytes, &blen) || !bytes || blen <= 0) {
+        free(bytes);
+        return FALSE;
+    }
+    if (blen > 16 * 1024 * 1024) {    /* keep the html usable */
+        free(bytes);
+        return FALSE;
+    }
+    char head[40];
+    wsprintfA(head, "data:%s;base64,", mime);
+    h_app(o, head);
+    h_app_b64(o, bytes, blen);
+    free(bytes);
+    return TRUE;
+}
+
 static void h_inline(HtmlOut *o, const wchar_t *s, int len, int depth)
 {
     for (int i = 0; i < len; i++) {
@@ -1623,11 +1757,39 @@ static void h_inline(HtmlOut *o, const wchar_t *s, int len, int depth)
                 while (rp < len && s[rp] != L')') rp++;
                 if (rp < len) {
                     h_app(o, "<img src=\"");
-                    h_appurl(o, s + rb + 2, rp - rb - 2);
+                    if (!(g_htmlEmbed
+                          && h_img_data_uri(o, s + rb + 2, rp - rb - 2)))
+                        h_appurl(o, s + rb + 2, rp - rb - 2);
                     h_app(o, "\" alt=\"");
                     h_appw(o, s + i + 2, rb - i - 2);
                     h_app(o, "\">");
                     i = rp;
+                    continue;
+                }
+            }
+        }
+        if (c == L'[' && i + 1 < len && s[i+1] == L'[') {
+            int j = i + 2;
+            while (j + 1 < len && !(s[j] == L']' && s[j+1] == L']')) j++;
+            if (j + 1 < len && j > i + 2) {
+                const wchar_t *tgt = s + i + 2;
+                int tl = j - i - 2;
+                int txtOff = 0, txtLen = tl;
+                for (int k = 0; k < tl; k++) {
+                    if (tgt[k] == L'|') {
+                        txtOff = k + 1;
+                        txtLen = tl - k - 1;
+                        tl = k;
+                        break;
+                    }
+                }
+                if (tl >= 1 && tl < 260 && txtLen >= 1) {
+                    h_app(o, "<a href=\"");
+                    h_appurl(o, tgt, tl);
+                    h_app(o, ".md\">");
+                    h_inline(o, tgt + txtOff, txtLen, depth + 1);
+                    h_app(o, "</a>");
+                    i = j + 1;
                     continue;
                 }
             }
@@ -2012,4 +2174,20 @@ int md_to_html(const wchar_t *src, int srcLen, char **out)
     if (!o.buf) return 0;
     *out = o.buf;
     return o.len;
+}
+
+/* standalone share export: like md_to_html, but local images referenced
+ * relative to docPath (the document's directory) are inlined as base64
+ * data URIs so the single .html file renders anywhere. */
+int md_to_html_standalone(const wchar_t *src, int srcLen,
+                          const wchar_t *docPath, char **out)
+{
+    g_htmlImgDir[0] = 0;
+    if (docPath && docPath[0])
+        lstrcpynW(g_htmlImgDir, docPath, MAX_PATH);
+    g_htmlEmbed = TRUE;
+    int r = md_to_html(src, srcLen, out);
+    g_htmlEmbed = FALSE;
+    g_htmlImgDir[0] = 0;
+    return r;
 }

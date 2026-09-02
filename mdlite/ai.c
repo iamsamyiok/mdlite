@@ -1455,6 +1455,14 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(g_hwnd, WM_EDITCMD, IDM_OPEN, 0);
             return 0;
         }
+        if (ctrl && wp == 'B') {    /* toggle file tree sidebar */
+            SendMessageW(g_hwnd, WM_EDITCMD, IDM_TREEBAR, 0);
+            return 0;
+        }
+        if (ctrl && shift && wp == 'L') {   /* backlinks & orphans panel */
+            SendMessageW(g_hwnd, WM_EDITCMD, IDM_LINKS, 0);
+            return 0;
+        }
         if (ctrl && wp == 'N') {
             SendMessageW(g_hwnd, WM_EDITCMD, IDM_NEW, 0);
             return 0;
@@ -1577,6 +1585,12 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
     }
     else if (msg == WM_CHAR) {
+        /* @ opens the markdown snippet insert menu */
+        if (wp == L'@' && !(GetKeyState(VK_CONTROL) & 0x8000)
+            && !(GetKeyState(VK_MENU) & 0x8000)) {
+            ShowInsertMenu();
+            return 0;
+        }
         if (wp == VK_TAB && !(GetKeyState(VK_CONTROL) & 0x8000)) {
             SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)L"    ");
             return 0;

@@ -3,6 +3,29 @@
 #include <stdio.h>
 #include "markdown.h"
 
+BOOL ReadAllBytes(const wchar_t *path, char **buf, int *len)
+{
+    *buf = NULL;
+    *len = 0;
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE || size > 64 * 1024 * 1024) {
+        CloseHandle(h);
+        return FALSE;
+    }
+    char *b = (char *)malloc(size ? size : 1);
+    DWORD got = 0;
+    BOOL ok = b && ReadFile(h, b, size, &got, NULL) && got == size;
+    CloseHandle(h);
+    if (!ok) { free(b); return FALSE; }
+    *buf = b;
+    *len = (int)size;
+    return TRUE;
+}
+
+
 static int g_fail = 0;
 static void expect(int cond, const char *what)
 {

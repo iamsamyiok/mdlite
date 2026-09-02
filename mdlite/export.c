@@ -133,6 +133,95 @@ void ExportHtml(void)
         MessageBoxW(g_hwnd, L"导出失败。", APP_NAME, MB_ICONERROR);
 }
 
+/* ---- share export (single self-contained html, images inlined) ---- */
+
+void ExportShareHtml(void)
+{
+    int len = GetWindowTextLengthW(g_edit);
+    if (len <= 0) {
+        MessageBoxW(g_hwnd, L"文档为空。", APP_NAME, MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t *wbuf = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
+    if (!wbuf) return;
+    GetWindowTextW(g_edit, wbuf, len + 1);
+
+    /* document directory: where relative image urls resolve */
+    wchar_t dir[MAX_PATH];
+    dir[0] = 0;
+    if (g_path[0]) {
+        lstrcpynW(dir, g_path, MAX_PATH);
+        wchar_t *slash = wcsrchr(dir, L'\\');
+        if (slash) *slash = 0;
+        else dir[0] = 0;
+    }
+
+    char *html = NULL;
+    int hl = md_to_html_standalone(wbuf, len, dir, &html);
+    free(wbuf);
+    if (!hl || !html) {
+        MessageBoxW(g_hwnd, L"生成 HTML 失败。", APP_NAME, MB_ICONERROR);
+        free(html);
+        return;
+    }
+
+    wchar_t buf[MAX_PATH];
+    buf[0] = 0;
+    if (g_name[0]) {
+        lstrcpynW(buf, g_name, MAX_PATH);
+        wchar_t *dot = wcsrchr(buf, L'.');
+        if (dot) *dot = 0;
+        lstrcpynW(buf + lstrlenW(buf), L"-share.html",
+                  MAX_PATH - lstrlenW(buf));
+    } else lstrcpynW(buf, L"MDLite-share.html", MAX_PATH);
+
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = L"HTML (*.html;*.htm)\0*.html;*.htm\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"html";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetSaveFileNameW(&ofn)) { free(html); return; }
+    BOOL ok = WriteAllBytes(buf, html, hl);
+    free(html);
+    if (!ok) {
+        MessageBoxW(g_hwnd, L"导出失败。", APP_NAME, MB_ICONERROR);
+        return;
+    }
+
+    /* copy the file path so it can be pasted into a chat/mail right away */
+    int n = lstrlenW(buf);
+    if (OpenClipboard(g_hwnd)) {
+        EmptyClipboard();
+        HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (n + 1) * sizeof(wchar_t));
+        if (g) {
+            wchar_t *p = (wchar_t *)GlobalLock(g);
+            if (p) {
+                lstrcpynW(p, buf, n + 1);
+                GlobalUnlock(g);
+                SetClipboardData(CF_UNICODETEXT, g);
+            } else {
+                GlobalFree(g);
+            }
+        }
+        CloseClipboard();
+    }
+
+    /* reveal the file in explorer */
+    wchar_t sel[MAX_PATH + 32];
+    wsprintfW(sel, L"/select,\"%s\"", buf);
+    ShellExecuteW(NULL, NULL, L"explorer.exe", sel, NULL, SW_SHOWNORMAL);
+
+    wchar_t msg[MAX_PATH + 96];
+    wsprintfW(msg, L"已导出自包含 HTML（图片已内嵌）：\n%s\n\n"
+                L"文件路径已复制到剪贴板，双击即可在任意浏览器查看。",
+              buf);
+    MessageBoxW(g_hwnd, msg, APP_NAME, MB_OK | MB_ICONINFORMATION);
+}
+
 /* ---- plain-text export (item 33): strip markdown syntax ---- */
 
 /* in-place-ish single-pass stripper; returns new length */
