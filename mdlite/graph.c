@@ -1,4 +1,5 @@
 /* MDLite - workspace graph view: nodes = .md files, edges = wiki-links */
+#include <stdio.h>
 #define _WIN32_WINNT 0x0601
 #define _ISOC99_SOURCE
 #include "graph.h"
@@ -141,12 +142,15 @@ static void ScanFileForLinks(const wchar_t *path)
             int j = i + 2;
             while (w[j] && !(w[j] == L']' && w[j+1] == L']')) j++;
             if (w[j] == L']' && j > i + 2) {
+                wchar_t save = w[j];
+                w[j] = 0;   /* cut the target at "]]" for NormTarget */
                 int si = -1;
                 for (int k = 0; k < g_nN; k++)
                     if (lstrcmpiW(g_nodes[k].path, path) == 0) { si = k; break; }
-                if (si < 0) { i = j + 1; continue; }
+                if (si < 0) { w[j] = save; i = j + 1; continue; }
                 wchar_t tgtNorm[260];
                 NormTarget(w + i + 2, tgtNorm, 260);
+                w[j] = save;
                 int di = -1;
                 for (int k = 0; k < g_nN; k++) {
                     wchar_t nk[260];
@@ -168,6 +172,8 @@ static void ScanFileForLinks(const wchar_t *path)
                 int k = j + 2;
                 while (w[k] && w[k] != L')') k++;
                 if (w[k] == L')' && k > j + 1) {
+                    wchar_t save = w[k];
+                    w[k] = 0;   /* cut the target at ")" for NormTarget */
                     int si = -1;
                     for (int m = 0; m < g_nN; m++)
                         if (lstrcmpiW(g_nodes[m].path, path) == 0) { si = m; break; }
@@ -189,6 +195,7 @@ static void ScanFileForLinks(const wchar_t *path)
                             g_nodes[di].inDeg++;
                         }
                     }
+                    w[k] = save;
                 }
             }
         }
@@ -259,14 +266,17 @@ static void GraphLayout(void)
         if (g_nN == 1) { g_nodes[0].x = 0; g_nodes[0].y = 0; }
         return;
     }
-    const float R = 300.0f;
+    const float R = g_nN <= 8 ? 200.0f : (g_nN <= 24 ? 300.0f : 420.0f);
     for (int i = 0; i < g_nN; i++) {
         float a = (2.0f * (float)i * 3.14159265f) / (float)g_nN;
         g_nodes[i].x = R * cosf(a);
         g_nodes[i].y = R * sinf(a);
     }
-    const float K = 120.0f, C = 8000.0f, MAXV = 10.0f;
-    for (int iter = 0; iter < 15; iter++) {
+    /* Fruchterman-Reingold: repulsion C2/d pushes nodes apart, springs
+     * pull linked nodes toward rest length L. With C2=400 the force
+     * balance sits near 1.4*L so the graph stays inside the viewport. */
+    const float C2 = 400.0f, L = 200.0f, S = 3.5f, MAXV = 8.0f;
+    for (int iter = 0; iter < 25; iter++) {
         float *fx = (float *)calloc(g_nN, sizeof(float));
         float *fy = (float *)calloc(g_nN, sizeof(float));
         if (!fx || !fy) { free(fx); free(fy); break; }
@@ -276,8 +286,9 @@ static void GraphLayout(void)
                 float dy = g_nodes[j].y - g_nodes[i].y;
                 float d2 = dx * dx + dy * dy;
                 if (d2 < 1.0f) d2 = 1.0f;
-                float f = C / d2;
-                float invD = 1.0f / sqrtf(d2);
+                float d = sqrtf(d2);
+                float f = C2 / d;
+                float invD = 1.0f / d;
                 float fxi = -f * dx * invD;
                 float fyi = -f * dy * invD;
                 fx[i] += fxi; fy[i] += fyi;
@@ -290,7 +301,8 @@ static void GraphLayout(void)
             float dy = g_nodes[b].y - g_nodes[a].y;
             float d = sqrtf(dx * dx + dy * dy);
             if (d < 1.0f) d = 1.0f;
-            float f = (d * d) / K;
+            if (d <= L) continue;   /* springs only pull, never push */
+            float f = (d - L) / L * S;
             float ux = dx / d, uy = dy / d;
             fx[a] += f * ux; fy[a] += f * uy;
             fx[b] -= f * ux; fy[b] -= f * uy;
@@ -432,10 +444,16 @@ void GraphDraw(HDC dc, const RECT *rc)
     xf.eM21 = 0.0f;     xf.eM22 = g_zoom;
     xf.eDx  = (FLOAT)(rc->right  / 2.0 + g_offX);
     xf.eDy  = (FLOAT)(rc->bottom / 2.0 + g_offY);
+    /* world transform only works in GM_ADVANCED; in the default
+     * compatible mode SetWorldTransform fails silently and the nodes
+     * end up drawn at raw world coordinates (mostly off-window) */
+    int prevGM = SetGraphicsMode(dc, GM_ADVANCED);
     SetWorldTransform(dc, &xf);
     for (int i = 0; i < g_nE; i++) GraphDrawEdge(dc, i);
     for (int i = 0; i < g_nN; i++) GraphDrawNode(dc, i);
-    SetWorldTransform(dc, NULL);
+    XFORM xfId = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f };
+    SetWorldTransform(dc, &xfId);
+    SetGraphicsMode(dc, prevGM);
 
     HFONT oldFont = (HFONT)SelectObject(dc, g_fontHeader);
     SetBkMode(dc, TRANSPARENT);

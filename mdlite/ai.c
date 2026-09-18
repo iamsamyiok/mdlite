@@ -1542,6 +1542,10 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(g_hwnd, WM_EDITCMD, IDM_OUTLINE, 0);
             return 0;
         }
+        if (ctrl && wp == 'G') {    /* knowledge graph view */
+            SendMessageW(g_hwnd, WM_EDITCMD, IDM_GRAPH, 0);
+            return 0;
+        }
         if (ctrl && wp == 'J' && !g_aiBusy && !g_agBusy) {
             ShowSelAiMenu();
             return 0;

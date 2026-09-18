@@ -363,11 +363,25 @@ static BOOL EnsureRepo(const wchar_t *repo)
     wchar_t sub[MAX_PATH + 128];
     wsprintfW(sub, L"%s\\refs\\heads", repo);
     if (GetFileAttributesW(sub) == INVALID_FILE_ATTRIBUTES) {
+        /* CreateDirectoryW creates exactly one level; walk the chain so
+         * "<exe>\.mdlite\history\<hash>" is built level by level */
+        wchar_t walk[MAX_PATH + 128];
+        lstrcpynW(walk, repo, MAX_PATH + 128);
+        int wlen = lstrlenW(walk);
+        for (int i = 1; i < wlen; i++) {
+            if (walk[i] == L'\\' || walk[i] == L'/') {
+                wchar_t saved = walk[i];
+                walk[i] = 0;
+                CreateDirectoryW(walk, NULL);
+                walk[i] = saved;
+            }
+        }
+        CreateDirectoryW(walk, NULL);
+        if (GetFileAttributesW(repo) == INVALID_FILE_ATTRIBUTES) return FALSE;
         wchar_t objs[MAX_PATH + 128], refs[MAX_PATH + 128];
         wsprintfW(objs, L"%s\\objects", repo);
-        wsprintfW(refs, L"%s\\refs", repo);
-        CreateDirectoryW(repo, NULL);
         CreateDirectoryW(objs, NULL);
+        wsprintfW(refs, L"%s\\refs", repo);
         CreateDirectoryW(refs, NULL);
         CreateDirectoryW(sub, NULL);
         if (GetFileAttributesW(sub) == INVALID_FILE_ATTRIBUTES) return FALSE;

@@ -114,19 +114,19 @@ static int font_cellheight(HDC hdc, HFONT f)
 void md_init_fonts(MDFonts *f, HDC hdc, int dpi)
 {
     md_free_fonts(f);
-    f->body     = make_font(dpi, L"Segoe UI", 105, 0, 0, 0); /* 10.5pt */
-    f->bold     = make_font(dpi, L"Segoe UI", 105, 1, 0, 0);
-    f->ital     = make_font(dpi, L"Segoe UI", 105, 0, 1, 0);
-    f->boldital = make_font(dpi, L"Segoe UI", 105, 1, 1, 0);
-    f->mono     = make_font(dpi, L"Consolas", 95, 0, 0, 0);
-    f->sup      = make_font(dpi, L"Segoe UI", 75, 0, 0, 0);  /* 7.5pt */
+    f->body     = make_font(dpi, UiFaceName(), 105, 0, 0, 0); /* 10.5pt */
+    f->bold     = make_font(dpi, UiFaceName(), 105, 1, 0, 0);
+    f->ital     = make_font(dpi, UiFaceName(), 105, 0, 1, 0);
+    f->boldital = make_font(dpi, UiFaceName(), 105, 1, 1, 0);
+    f->mono     = make_font(dpi, MonoFaceName(), 95, 0, 0, 0);
+    f->sup      = make_font(dpi, UiFaceName(), 75, 0, 0, 0);  /* 7.5pt */
     /* heading ladder: each level clearly larger than the next */
-    f->h[0]     = make_font(dpi, L"Segoe UI", 260, 1, 0, 0); /* 26pt */
-    f->h[1]     = make_font(dpi, L"Segoe UI", 200, 1, 0, 0); /* 20pt */
-    f->h[2]     = make_font(dpi, L"Segoe UI", 160, 1, 0, 0); /* 16pt */
-    f->h[3]     = make_font(dpi, L"Segoe UI", 135, 1, 0, 0); /* 13.5pt */
-    f->h[4]     = make_font(dpi, L"Segoe UI", 118, 1, 0, 0); /* 11.8pt */
-    f->h[5]     = make_font(dpi, L"Segoe UI", 108, 1, 0, 0); /* 10.8pt */
+    f->h[0]     = make_font(dpi, UiFaceName(), 260, 1, 0, 0); /* 26pt */
+    f->h[1]     = make_font(dpi, UiFaceName(), 200, 1, 0, 0); /* 20pt */
+    f->h[2]     = make_font(dpi, UiFaceName(), 160, 1, 0, 0); /* 16pt */
+    f->h[3]     = make_font(dpi, UiFaceName(), 135, 1, 0, 0); /* 13.5pt */
+    f->h[4]     = make_font(dpi, UiFaceName(), 118, 1, 0, 0); /* 11.8pt */
+    f->h[5]     = make_font(dpi, UiFaceName(), 108, 1, 0, 0); /* 10.8pt */
     f->bodyH = font_cellheight(hdc, f->body);
     f->monoH = font_cellheight(hdc, f->mono);
     f->supH  = font_cellheight(hdc, f->sup);

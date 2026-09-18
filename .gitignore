@@ -4,6 +4,9 @@
 *.a
 *.dll
 
+# 运行时目录（草稿/自动保存/历史）
+mdlite/mdlite/
+
 # 截图
 screenshot_*.png
 edit.png
@@ -22,3 +25,5 @@ split.png
 # 系统文件
 .DS_Store
 Thumbs.db
+mdlite/.mdlite/
+mdlite/*.html

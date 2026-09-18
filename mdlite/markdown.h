@@ -148,4 +148,8 @@ extern COLORREF g_colText, g_colHeading, g_colQuote, g_colCodeBg,
                 g_colCodeInlineBg, g_colLink, g_colHr, g_colQuoteBar,
                 g_colHeadingRule;
 
+/* UI / mono face names shared from main.c (Wine-safe CJK faces) */
+const wchar_t *UiFaceName(void);
+const wchar_t *MonoFaceName(void);
+
 #endif

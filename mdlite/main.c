@@ -172,6 +172,88 @@ static int WineEnv(void)
     return ntdll && GetProcAddress(ntdll, "wine_get_version") != NULL;
 }
 
+/* ---- font availability probing ------------------------------------ */
+/* Wine registers only some faces inside .ttc collections and does no
+ * GDI font-linking, so a face name alone is not enough: we also verify
+ * the face really renders CJK glyphs before using it. */
+
+static int CALLBACK FaceEnumProc(const ENUMLOGFONTEXW *e,
+                                 const TEXTMETRICW *tm, DWORD ft, LPARAM lp)
+{
+    (void)e; (void)tm; (void)ft;
+    *(BOOL *)lp = TRUE;
+    return 1; /* one hit is enough */
+}
+
+static BOOL FontAvailable(const wchar_t *name)
+{
+    HDC dc = GetDC(g_hwnd);
+    LOGFONTW lf;
+    BOOL found = FALSE;
+    ZeroMemory(&lf, sizeof(lf));
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynW(lf.lfFaceName, name, LF_FACESIZE);
+    EnumFontFamiliesExW(dc, &lf, (FONTENUMPROCW)FaceEnumProc, (LPARAM)&found, 0);
+    ReleaseDC(g_hwnd, dc);
+    return found;
+}
+
+static BOOL FaceHasCJK(const wchar_t *name)
+{
+    HFONT f = CreateFontW(0, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          DEFAULT_PITCH, name);
+    BOOL ok = FALSE;
+    if (f) {
+        HDC dc = GetDC(g_hwnd);
+        HFONT old = (HFONT)SelectObject(dc, f);
+        WORD gi[2] = { 0xFFFF, 0xFFFF };
+        if (GetGlyphIndicesW(dc, L"\x4e2d\x6c38", 2, gi, 1) == 2)
+            ok = (gi[0] != 0xFFFF && gi[1] != 0xFFFF);
+        SelectObject(dc, old);
+        DeleteObject(f);
+        ReleaseDC(g_hwnd, dc);
+    }
+    return ok;
+}
+
+/* pick the first candidate that exists and (optionally) has CJK glyphs */
+static const wchar_t *PickFace(const wchar_t *const *cands, int n, int needCJK)
+{
+    for (int i = 0; i < n; i++)
+        if (FontAvailable(cands[i]) && (!needCJK || FaceHasCJK(cands[i])))
+            return cands[i];
+    return cands[0];
+}
+
+static const wchar_t *const k_uiFaces[] = {
+    L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"WenQuanYi Micro Hei",
+    L"WenQuanYi Zen Hei", L"Microsoft YaHei", L"SimHei"
+};
+static const wchar_t *const k_monoFaces[] = {
+    L"Noto Sans Mono CJK SC", L"Noto Sans Mono CJK JP",
+    L"WenQuanYi Micro Hei Mono", L"Noto Sans CJK SC",
+    L"WenQuanYi Micro Hei"
+};
+
+static wchar_t g_faceUI[LF_FACESIZE]   = L"Segoe UI";
+static wchar_t g_faceMono[LF_FACESIZE] = L"Consolas";
+
+const wchar_t *UiFaceName(void)  { return g_faceUI;  }
+const wchar_t *MonoFaceName(void) { return g_faceMono; }
+
+static void ResolveFaces(void)
+{
+    if (WineEnv()) {
+        lstrcpynW(g_faceUI,   PickFace(k_uiFaces,  (int)(sizeof(k_uiFaces)/sizeof(*k_uiFaces)),     TRUE), LF_FACESIZE);
+        lstrcpynW(g_faceMono, PickFace(k_monoFaces,(int)(sizeof(k_monoFaces)/sizeof(*k_monoFaces)), TRUE), LF_FACESIZE);
+    } else {
+        lstrcpynW(g_faceUI,   L"Segoe UI", LF_FACESIZE);
+        lstrcpynW(g_faceMono, L"Consolas", LF_FACESIZE);
+    }
+}
+
 static void CreateUiFonts(void)
 {
     HDC dc = GetDC(g_hwnd);
@@ -182,8 +264,9 @@ static void CreateUiFonts(void)
 
     int fdpi = MulDiv(g_dpi, ZOOMS[g_zoom], 100); /* text scales, chrome stays */
 
-    const wchar_t *uiFace   = WineEnv() ? L"WenQuanYi Micro Hei" : L"Segoe UI";
-    const wchar_t *monoFace = WineEnv() ? L"Noto Sans Mono CJK SC" : L"Consolas";
+    ResolveFaces();
+    const wchar_t *uiFace   = g_faceUI;
+    const wchar_t *monoFace = g_faceMono;
 
     LOGFONTW lf;
     ZeroMemory(&lf, sizeof(lf));
@@ -711,9 +794,84 @@ static BOOL DoSave(void)
     return ok;
 }
 
+/* ---- temp-session autosave -------------------------------------- */
+/* Documents that were never saved to a user folder get adopted into
+ * <exe dir>\mdlite\autosave\ as real files named
+ * YYYY-MM-DD_HH-MM-SS_v001.md. From then on the regular per-minute
+ * autosave (TIMER_AUTO -> DoSaveEx) keeps them persisted, quitting
+ * saves them silently, and the next launch without a file argument
+ * reopens the newest one. */
+
+static void AutoSaveDir(wchar_t *out, int cch)
+{
+    wchar_t exe[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) { out[0] = 0; return; }
+    wchar_t *slash = exe;
+    for (wchar_t *p = exe; *p; p++)
+        if (*p == L'\\' || *p == L'/') slash = p;
+    *++slash = 0;
+    lstrcpynW(out, exe, cch);
+    lstrcatW(out, L"mdlite");
+    CreateDirectoryW(out, NULL);
+    lstrcatW(out, L"\\autosave");
+    CreateDirectoryW(out, NULL);
+}
+
+static BOOL PathInAutoSaveDir(void)
+{
+    if (!g_path[0]) return FALSE;
+    wchar_t dir[MAX_PATH]; AutoSaveDir(dir, MAX_PATH);
+    if (!dir[0]) return FALSE;
+    return wcsncmp(g_path, dir, lstrlenW(dir)) == 0;
+}
+
+/* first autosave of an untitled document: adopt a session file so all
+ * regular save paths take over from here */
+static BOOL AdoptSessionFile(void)
+{
+    wchar_t dir[MAX_PATH]; AutoSaveDir(dir, MAX_PATH);
+    if (!dir[0]) return FALSE;
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t path[MAX_PATH];
+    wsprintfW(path, L"%s\\%04d-%02d-%02d_%02d-%02d-%02d_v001.md",
+              dir, (int)st.wYear, (int)st.wMonth, (int)st.wDay,
+              (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
+    SetPath(path);
+    return DoSaveEx(TRUE);
+}
+
+/* reopen the newest temp-session file when starting without a file
+ * argument; a restored draft or any loaded document wins */
+static void RestoreLatestSession(void)
+{
+    if (g_path[0] || GetWindowTextLengthW(g_edit) > 0) return;
+    wchar_t dir[MAX_PATH]; AutoSaveDir(dir, MAX_PATH);
+    if (!dir[0]) return;
+    wchar_t pat[MAX_PATH]; wsprintfW(pat, L"%s\\*.md", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    wchar_t best[MAX_PATH]; best[0] = 0;
+    ULONGLONG bestv = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        ULONGLONG v = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32)
+                    | fd.ftLastWriteTime.dwLowDateTime;
+        if (v > bestv) {
+            bestv = v;
+            wsprintfW(best, L"%s\\%s", dir, fd.cFileName);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (best[0]) LoadFile(best);
+}
+
 BOOL ConfirmDiscard(void)   /* public: tree.c checks before opening */
 {
     if (!g_dirty) return TRUE;
+    /* temp-session files under the autosave dir are saved silently:
+     * the user never picked a folder, so quitting keeps the content */
+    if (PathInAutoSaveDir()) return DoSaveEx(TRUE);
     int r = MessageBoxW(g_hwnd, L"文档已修改，是否保存更改？", APP_NAME,
                         MB_YESNOCANCEL | MB_ICONQUESTION);
     if (r == IDCANCEL) return FALSE;
@@ -873,7 +1031,7 @@ static RECT BtnRect(int id) /* 0 open 1 save 2 more 3 topmost */
 {
     RECT rc;
     if (id == 3) {                 /* narrow pin toggle right of more */
-        rc.left = SC(14) + 2 * (SC(64) + SC(8));
+        rc.left = SC(14) + 3 * (SC(64) + SC(8));
         rc.top = SC(10);
         rc.right = rc.left + SC(48);
         rc.bottom = rc.top + SC(28);
@@ -3619,6 +3777,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDM_TREEBAR:
             TreeToggle();
+            LayoutChildren();   /* reflow the edit control or the tree
+                                 * stays hidden underneath it */
             SaveSettings();
             return 0;
         case IDM_LINKS:
@@ -3967,7 +4127,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             } else if (g_dirty && !g_path[0]
                        && !g_aiBusy && !g_agBusy
                        && GetTickCount() - g_lastDraftTick > 5000) {
-                WriteDraft();
+                /* give the untitled document a real session file so the
+                 * regular autosave takes over; draft is the fallback */
+                if (!AdoptSessionFile())
+                    WriteDraft();
             }
             return 0;
         }
@@ -4077,6 +4240,92 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 /* ------------------------------------------------------------------ */
 
 static HWND   g_setDlg;
+static BOOL   g_ocInstalling;   /* opencode install thread running */
+
+/* run a hidden console command, capture stdout+stderr into out.
+ * returns the exit code, or 0xFFFFFFFF when the process cannot start */
+static DWORD RunCmdHide(const wchar_t *cmdline, wchar_t *out, int outCch)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE rd = NULL, wr = NULL;
+    if (out && outCch > 0) {
+        if (!CreatePipe(&rd, &wr, &sa, 0)) return 0xFFFFFFFF;
+        SetHandleInformation(rd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    }
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    wchar_t cmd[1024];
+    lstrcpynW(cmd, cmdline, 1024);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, NULL, &si, &pi)) {
+        if (rd) { CloseHandle(rd); CloseHandle(wr); }
+        return 0xFFFFFFFF;
+    }
+    if (wr) CloseHandle(wr);
+    if (out && rd) {
+        DWORD n = 0, total = 0;
+        char buf[1024];
+        while (total < (DWORD)outCch - 1
+               && ReadFile(rd, buf, sizeof(buf), &n, NULL) && n > 0) {
+            if (total + n > (DWORD)outCch - 1) n = (DWORD)outCch - 1 - total;
+            for (DWORD i = 0; i < n; i++) out[total + i] = (wchar_t)buf[i];
+            total += n;
+        }
+        out[total] = 0;
+        CloseHandle(rd);
+    }
+    WaitForSingleObject(pi.hProcess, 300000);   /* 5 min cap */
+    DWORD code = 0xFFFFFFFF;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code;
+}
+
+/* locate opencode on PATH (opencode.exe from the official installer,
+ * opencode.cmd from npm global installs) */
+static BOOL DetectOpenCode(wchar_t *path, int cch)
+{
+    wchar_t found[MAX_PATH];
+    DWORD n = SearchPathW(NULL, L"opencode.exe", NULL, MAX_PATH, found, NULL);
+    if (n == 0 || n >= MAX_PATH)
+        n = SearchPathW(NULL, L"opencode.cmd", NULL, MAX_PATH, found, NULL);
+    if (n == 0 || n >= MAX_PATH) return FALSE;
+    lstrcpynW(path, found, cch);
+    return TRUE;
+}
+
+/* background installer: npm first, official PowerShell script as
+ * fallback; posts WM_APP+77 back to the settings dialog when done */
+static DWORD WINAPI InstallOpenCodeThread(LPVOID param)
+{
+    (void)param;
+    HWND dlg = g_setDlg;
+    wchar_t found[MAX_PATH];
+    int how = 0;
+    if (SearchPathW(NULL, L"npm.exe", NULL, MAX_PATH, found, NULL)
+        || SearchPathW(NULL, L"npm.cmd", NULL, MAX_PATH, found, NULL))
+        how = 1;
+    else
+        how = 2;    /* PowerShell ships with every Windows install */
+    BOOL ok = FALSE;
+    if (how == 1)
+        ok = RunCmdHide(L"cmd.exe /c npm install -g opencode-ai", NULL, 0) == 0;
+    else if (how == 2)
+        ok = RunCmdHide(L"powershell.exe -NoProfile -Command "
+                        L"\"irm https://opencode.ai/install.ps1 | iex\"",
+                        NULL, 0) == 0;
+    if (dlg) PostMessageW(dlg, WM_APP + 77, ok ? 1 : 0, how);
+    return 0;
+}
 static HFONT  g_setFont;            /* dialog text font (CJK-safe face) */
 static HWND   g_hkEdit;
 static WNDPROC g_hkProc;
@@ -4153,7 +4402,7 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         lf.lfCharSet = DEFAULT_CHARSET;
         lf.lfQuality = CLEARTYPE_QUALITY;
         lstrcpynW(lf.lfFaceName,
-                  WineEnv() ? L"WenQuanYi Micro Hei" : L"SimHei",
+                  WineEnv() ? UiFaceName() : L"SimHei",
                   LF_FACESIZE);
         HFONT f = CreateFontIndirectW(&lf);
         g_setFont = f;
@@ -4204,8 +4453,10 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             { L"STATIC",  L"携带最近 N 轮问答，0 = 单轮", SS_LEFT,
               0, 96, 472, 210, 18 },
             /* -- card 3: Agent -- */
-            { L"STATIC",  L"Open Code 路径（空 = 自动查找）", SS_LEFT,
-              0, 24, 538, 260, 18 },
+            { L"STATIC",  L"Open Code 路径", SS_LEFT,
+              0, 24, 538, 100, 18 },
+            { L"BUTTON",  L"检测 / 一键安装", BS_PUSHBUTTON | WS_TABSTOP,
+              209, 130, 536, 134, 22 },
             { L"EDIT",    L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
               205, 24, 560, 264, 26 },
             { L"STATIC",  L"超时(秒)", SS_LEFT, 0, 300, 538, 70, 18 },
@@ -4330,6 +4581,33 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_COMMAND: {
         int id = LOWORD(wp);
+        if (id == 209) {    /* detect / one-click install opencode */
+            wchar_t path[512];
+            if (DetectOpenCode(path, 512)) {
+                MessageBoxW(h, path, L"已检测到 opencode",
+                            MB_OK | MB_ICONINFORMATION);
+            } else if (!g_ocInstalling) {
+                if (MessageBoxW(h,
+                    L"未检测到 opencode。是否现在自动安装？\r\n\r\n"
+                    L"优先使用 npm 全局安装，否则使用官方 PowerShell 脚本。\r\n"
+                    L"安装过程约 1-3 分钟，完成后自动填入路径。",
+                    APP_NAME, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    g_ocInstalling = TRUE;
+                    HWND btn = GetDlgItem(h, 209);
+                    SetWindowTextW(btn, L"安装中…");
+                    EnableWindow(btn, FALSE);
+                    HANDLE t = CreateThread(NULL, 0, InstallOpenCodeThread,
+                                            NULL, 0, NULL);
+                    if (t) CloseHandle(t);
+                    else {
+                        g_ocInstalling = FALSE;
+                        SetWindowTextW(btn, L"检测 / 一键安装");
+                        EnableWindow(btn, TRUE);
+                    }
+                }
+            }
+            return 0;
+        }
         if (id == 102) { /* clear hotkey */
             g_dlgVk = 0;
             g_dlgMod = 0;
@@ -4388,6 +4666,27 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             DestroyWindow(h);
             PostThreadMessageW(GetCurrentThreadId(), WM_NULL, 0, 0);
             return 0;
+        }
+        return 0;
+    }
+    case WM_APP + 77: {   /* opencode install thread finished */
+        g_ocInstalling = FALSE;
+        HWND btn = GetDlgItem(h, 209);
+        if (btn) {
+            SetWindowTextW(btn, L"检测 / 一键安装");
+            EnableWindow(btn, TRUE);
+        }
+        wchar_t path[512];
+        if (DetectOpenCode(path, 512)) {
+            SetDlgItemTextW(h, 205, path);
+            MessageBoxW(h, path, L"opencode 安装完成",
+                        MB_OK | MB_ICONINFORMATION);
+        } else {
+            MessageBoxW(h,
+                wp ? L"安装程序已执行，但未检测到 opencode。\r\n"
+                     L"新装的 PATH 可能需要重启 MDLite 后生效。"
+                   : L"安装失败：系统中未找到 npm 或 PowerShell。",
+                APP_NAME, MB_OK | MB_ICONWARNING);
         }
         return 0;
     }
@@ -4911,6 +5210,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmdLine, int show)
                 LoadFile(argv[0]);
             LocalFree(argv);
         }
+    } else {
+        /* no file requested: continue the last untitled session that
+         * was auto-saved under mdlite\autosave */
+        RestoreLatestSession();
     }
 
     MSG msg;
