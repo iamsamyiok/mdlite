@@ -5246,6 +5246,10 @@ static BOOL LoadSettings(RECT *rc, BOOL *maxi)
 /* entry                                                               */
 /* ------------------------------------------------------------------ */
 
+#ifndef MDLITE_MUTEX
+#define MDLITE_MUTEX L"MDLite_SingleInstance"
+#endif
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmdLine, int show)
 {
     (void)hPrev;
@@ -5256,7 +5260,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmdLine, int show)
 
     /* single instance: a second launch just surfaces the running one
      * (works for tray-hidden windows too - FindWindow sees hidden) */
-    HANDLE mut = CreateMutexW(NULL, FALSE, L"MDLite_SingleInstance");
+    HANDLE mut = CreateMutexW(NULL, FALSE, MDLITE_MUTEX);
     if (mut && GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND w = FindWindowW(L"MDLiteWnd", NULL);
         if (w) {
