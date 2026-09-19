@@ -29,17 +29,12 @@ jobs:
           export WINEPREFIX=$HOME/.wineprefix WINEDEBUG=-all DISPLAY=
           make test
 
+      - name: Checksum
+        working-directory: mdlite
+        run: sha256sum MDLite.exe > MDLite.exe.sha256
+
       - name: Create Release and upload exe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
-        run: |
-          sha256sum mdlite/MDLite.exe > MDLite.exe.sha256
-          gh release create "$REF_NAME" \
-            mdlite/MDLite.exe MDLite.exe.sha256 \
-            --verify-tag --generate-notes \
-            --title "MDLite $REF_NAME" \
-            --notes "Windows x64 单文件版。SHA256 见 MDLite.exe.sha256。
-
-  杀软提示：未签名的独立 exe 可能被 Windows Defender / SmartScreen 误报，
-  请核对 SHA256 后选择「更多信息 → 仍要运行」，或向 Microsoft 提交误报申诉。"
+        run: gh release create "$REF_NAME" mdlite/MDLite.exe MDLite.exe.sha256 --verify-tag --generate-notes --title "MDLite $REF_NAME" --notes "Windows x64 单文件版。校验和见 MDLite.exe.sha256。未签名 exe 可能被杀软误报，核对 SHA256 后选择仍要运行即可。"
