@@ -2,7 +2,9 @@
  * nodes = note file names, edges = wiki-links, nothing else.
  * Orbit with mouse drag, zoom with the wheel, double-click opens. */
 #include <stdio.h>
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
+#endif
 #define _ISOC99_SOURCE
 #include "graph.h"
 #include <stdlib.h>
@@ -425,13 +427,13 @@ static void GraphLayout(void)
 static BOOL ProjectPoint(float x, float y, float z, const RECT *rc,
                          float *sx, float *sy, float *depth, float *scale)
 {
-    float cy = cosf(g_yaw),  sy = sinf(g_yaw);
-    float cp = cosf(g_pitch), sp = sinf(g_pitch);
+    float cy = cosf(g_yaw),  syw = sinf(g_yaw);
+    float cp = cosf(g_pitch), spw = sinf(g_pitch);
     x -= g_tgtX; y -= g_tgtY; z -= g_tgtZ;
-    float x1 =  x * cy - z * sy;
-    float z1 =  x * sy + z * cy;
-    float y1 =  y * cp - z1 * sp;
-    float z2 =  y * sp + z1 * cp;
+    float x1 =  x * cy - z * syw;
+    float z1 =  x * syw + z * cy;
+    float y1 =  y * cp - z1 * spw;
+    float z2 =  y * spw + z1 * cp;
     float d = z2 + g_dist;
     if (d < GRAPH_NEAR) return FALSE;
     float s = GRAPH_FOCAL / d * 2.4f;
@@ -536,6 +538,7 @@ static void GraphDrawNode(HDC dc, int idx)
         Ellipse(dc, ball.left - 4, ball.top - 4,
                 ball.right + 4, ball.bottom + 4);
         SelectObject(dc, ob2);
+        SelectObject(dc, op2);
         DeleteObject(pn2);
     }
 
