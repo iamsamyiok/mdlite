@@ -322,6 +322,7 @@ static void BlBlockEntryName(const wchar_t *w, const BlLine *ln, wchar_t *nm)
 typedef struct {
     wchar_t path[MAX_PATH];
     wchar_t key[BL_MAXNAME];
+    wchar_t name[BL_MAXNAME];    /* original-case note name (displayed) */
     wchar_t *text;       /* wide content (loaded once) */
     int textLen;
     BOOL hasBom, hasCRLF;
@@ -349,6 +350,13 @@ void BacklinksSyncDir(const wchar_t *dir)
     for (int i = 0; i < nN; i++) {
         lstrcpynW(notes[i].path, files.v[i], MAX_PATH);
         BlKey(files.v[i], notes[i].key, BL_MAXNAME);
+        {   /* display name: basename without extension, original case */
+            const wchar_t *b = BlBaseOf(files.v[i]);
+            int n = 0;
+            for (; b[n] && b[n] != L'.' && n < BL_MAXNAME - 1; n++)
+                notes[i].name[n] = b[n];
+            notes[i].name[n] = 0;
+        }
         if (!BlLoad(files.v[i], &notes[i].text, &notes[i].textLen,
                     &notes[i].hasBom))
             continue;
@@ -374,8 +382,8 @@ void BacklinksSyncDir(const wchar_t *dir)
             const wchar_t *tgt = notes[i].outgoing.v[k];
             for (int j = 0; j < nN; j++) {
                 if (lstrcmpW(notes[j].key, tgt) != 0) continue;
-                if (j != i && !BlListHas(&incoming[j], notes[i].key))
-                    BlListAdd(&incoming[j], notes[i].key);
+                if (j != i && !BlListHas(&incoming[j], notes[i].name))
+                    BlListAdd(&incoming[j], notes[i].name);
                 break;
             }
         }
