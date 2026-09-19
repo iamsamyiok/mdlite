@@ -529,19 +529,17 @@ int main(void)
     /* ---- materialized backlinks (双向链接) ---- */
     {
         char base[MAX_PATH + 32];
-        DWORD n = GetTempPathA(MAX_PATH, base);
-        base[n] = 0;
-        strcat(base, "bl_test");
+        strcpy(base, "bl_test");
         mkdir(base);
         wchar_t wa[MAX_PATH], wb[MAX_PATH], wc2[MAX_PATH], wd[MAX_PATH];
         wchar_t wbase[MAX_PATH];
         MultiByteToWideChar(CP_UTF8, 0, base, -1, wbase, MAX_PATH);
         lstrcpynW(wa, wbase, MAX_PATH); lstrcpynW(wb, wbase, MAX_PATH);
         lstrcpynW(wc2, wbase, MAX_PATH); lstrcpynW(wd, wbase, MAX_PATH);
-        wcscat(wa, L"A.md");
-        wcscat(wb, L"B.md");
-        wcscat(wc2, L"C.md");
-        wcscat(wd, L"D.md");
+        wcscat(wa, L"/A.md");
+        wcscat(wb, L"/B.md");
+        wcscat(wc2, L"/C.md");
+        wcscat(wd, L"/D.md");
         BlWriteFile(wa, L"# A\n\nlink to [[B]] and [[C]]\n");
         BlWriteFile(wb, L"# B\n");
         BlWriteFile(wc2, L"# C\n");
