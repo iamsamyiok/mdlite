@@ -549,7 +549,7 @@ static BOOL SaveFileEx(const wchar_t *path, BOOL isAuto)
         } else {
             wchar_t dir[MAX_PATH];
             lstrcpynW(dir, path, MAX_PATH);
-            wchar_t *sl = wcsrchr(dir, L'\');
+            wchar_t *sl = wcsrchr(dir, L'\\');
             if (sl) { *sl = 0; BacklinksSyncDir(dir); }
         }
     }
