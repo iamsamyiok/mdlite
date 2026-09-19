@@ -27,3 +27,9 @@ split.png
 Thumbs.db
 mdlite/.mdlite/
 mdlite/*.html
+testnotes/
+*.exe
+!MDLite.exe
+bl_debug.log
+Ps1file
+*.ps1
