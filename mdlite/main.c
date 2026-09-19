@@ -13,6 +13,7 @@
 #include "markdown.h"
 #include "tree.h"
 #include "graph.h"
+#include "backlinks.h"
 #include <stdlib.h>
 #include <string.h>
 #include <wctype.h>
@@ -539,6 +540,19 @@ static BOOL SaveFileEx(const wchar_t *path, BOOL isAuto)
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
     if (LinksPanelOpen()) LinksFill();
+    /* materialized backlinks: keep the auto block at the end of
+     * every linked note in sync with this file's outgoing links */
+    if (!wcsstr(path, L"\\.mdlite")) {
+        const wchar_t *vault = TreeVaultDir();
+        if (vault[0]) {
+            BacklinksSyncDir(vault);
+        } else {
+            wchar_t dir[MAX_PATH];
+            lstrcpynW(dir, path, MAX_PATH);
+            wchar_t *sl = wcsrchr(dir, L'\');
+            if (sl) { *sl = 0; BacklinksSyncDir(dir); }
+        }
+    }
     return TRUE;
 }
 
