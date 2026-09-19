@@ -21,6 +21,11 @@ BOOL TreeContextMenu(LPARAM lp);       /* screen coords; TRUE = consumed */
 /* call cb(path, ctx) for every leaf .md file in the workspace tree */
 void TreeForEachFile(void (*cb)(const wchar_t *path, void *ctx), void *ctx);
 
+/* pin the workspace to a fixed vault folder ("" = follow the current
+ * document). When set, tree / graph / orphan scans all stay inside it. */
+void TreeSetVault(const wchar_t *dir);
+const wchar_t *TreeVaultDir(void);
+
 #endif
 
 /* ---- workspace link index (wiki-links) ---- */

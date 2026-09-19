@@ -8,6 +8,7 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 #include "mdlite.h"
 #include "markdown.h"
 #include "tree.h"
@@ -3029,21 +3030,25 @@ static void ShowWikiMenu(void)
 static void WkPosition(void)
 {
     if (!g_wkWnd) return;
-    POINT pt = { 0, 0 };
-    GetCaretPos(&pt);            /* caret pos inside the edit control */
-    ClientToScreen(g_edit, &pt);
-    ScreenToClient(g_hwnd, &pt);
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    /* EM_POSFROMCHAR is reliable regardless of caret visibility
+     * (GetCaretPos returns (0,0) whenever the caret is not realized,
+     * which parked the popup at the top-left of the screen) */
+    LPARAM pp = SendMessageW(g_edit, EM_POSFROMCHAR, (WPARAM)s0, 0);
+    POINT pt = { (int)(short)LOWORD(pp), (int)(short)HIWORD(pp) };
+    ClientToScreen(g_edit, &pt);   /* now screen coordinates */
     RECT rcBody;
     GetBodyRect(&rcBody);
-    int x = rcBody.left + pt.x;
-    int y = rcBody.top + pt.y + SC(20);
+    POINT tl = { rcBody.left, rcBody.top }, br = { rcBody.right, rcBody.bottom };
+    ClientToScreen(g_hwnd, &tl);
+    ClientToScreen(g_hwnd, &br);
+    int x = pt.x, y = pt.y + SC(22);   /* caret lower-right */
     int w = SC(260), hh = g_wkHH ? g_wkHH : SC(180);
-    RECT rcWnd;
-    GetWindowRect(g_hwnd, &rcWnd);
-    if (x + w > rcBody.right) x = rcBody.right - w;
-    if (x < rcBody.left) x = rcBody.left;
-    if (y + hh > rcBody.bottom) y = rcBody.top + pt.y - SC(20) - hh;
-    if (y < rcBody.top) y = rcBody.top;
+    if (x + w > br.x) x = br.x - w;
+    if (x < tl.x) x = tl.x;
+    if (y + hh > br.y) y = pt.y - SC(6) - hh;   /* flip above when tight */
+    if (y < tl.y) y = tl.y;
     SetWindowPos(g_wkWnd, HWND_TOPMOST, x, y, w, hh,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
@@ -3285,24 +3290,25 @@ static void ShowSlashMenu(void)
 static void SlPosition(void)
 {
     if (!g_slWnd) return;
-    POINT pt = { 0, 0 };
-    GetCaretPos(&pt);
-    ClientToScreen(g_edit, &pt);
-    ScreenToClient(g_hwnd, &pt);
-    /* park the menu at the caret's lower-right: one line below the
-     * insertion point, flush with the slash (no rcBody offset here —
-     * pt is already in main-window client coordinates) */
-    int x = pt.x;
-    int y = pt.y + SC(20);
-    int w = SC(260), hh = g_slHH ? g_slHH : SC(200);
+    DWORD s0 = 0, e0 = 0;
+    SendMessageW(g_edit, EM_GETSEL, (WPARAM)&s0, (LPARAM)&e0);
+    /* EM_POSFROMCHAR instead of GetCaretPos: the caret may not be
+     * realized when this runs, and its (0,0) fallback parked the menu
+     * at the top-left of the screen. */
+    LPARAM pp = SendMessageW(g_edit, EM_POSFROMCHAR, (WPARAM)s0, 0);
+    POINT pt = { (int)(short)LOWORD(pp), (int)(short)HIWORD(pp) };
+    ClientToScreen(g_edit, &pt);   /* now screen coordinates */
     RECT rcBody;
     GetBodyRect(&rcBody);
-    RECT rcWnd;
-    GetWindowRect(g_hwnd, &rcWnd);
-    if (x + w > rcBody.right) x = rcBody.right - w;
-    if (x < rcBody.left) x = rcBody.left;
-    if (y + hh > rcBody.bottom) y = pt.y - SC(4) - hh;
-    if (y < rcBody.top) y = rcBody.top;
+    POINT tl = { rcBody.left, rcBody.top }, br = { rcBody.right, rcBody.bottom };
+    ClientToScreen(g_hwnd, &tl);
+    ClientToScreen(g_hwnd, &br);
+    int x = pt.x, y = pt.y + SC(22);   /* caret lower-right */
+    int w = SC(260), hh = g_slHH ? g_slHH : SC(200);
+    if (x + w > br.x) x = br.x - w;
+    if (x < tl.x) x = tl.x;
+    if (y + hh > br.y) y = pt.y - SC(6) - hh;   /* flip above when tight */
+    if (y < tl.y) y = tl.y;
     SetWindowPos(g_slWnd, HWND_TOPMOST, x, y, w, hh,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
@@ -4368,6 +4374,32 @@ static HFONT  g_setFont;            /* dialog text font (CJK-safe face) */
 static HWND   g_hkEdit;
 static WNDPROC g_hkProc;
 static UINT   g_dlgMod, g_dlgVk;   /* dialog-local hotkey state */
+/* ---- vault folder: fixed scope for tree / graph / orphans ---- */
+static wchar_t g_vaultDir[MAX_PATH];
+
+static void ApplyVault(void)
+{
+    TreeSetVault(g_vaultDir);
+    TreeSync(g_path[0] ? g_path : NULL);
+    GraphBuild();
+    GraphResetView();
+    InvalidateRect(g_hwnd, NULL, TRUE);
+}
+
+static BOOL PickVaultFolder(HWND parent, wchar_t *out, int cch)
+{
+    BROWSEINFOW bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.hwndOwner = parent;
+    bi.lpszTitle = L"选择笔记库文件夹（文件树、知识图谱与孤儿笔记的扫描范围）";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return FALSE;
+    BOOL ok = SHGetPathFromIDListW(pidl, out);
+    CoTaskMemFree(pidl);
+    return ok;
+}
+
 static int    g_dlgAuto;          /* autosave seconds (dialog-local) */
 static int    g_dlgHist;          /* history cap (dialog-local) */
 static int    g_dlgDone;           /* 1=ok 2=cancel */
@@ -4504,12 +4536,22 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             { L"EDIT",    L"", WS_BORDER | ES_MULTILINE | ES_WANTRETURN
                               | WS_VSCROLL | WS_TABSTOP,
               206, 24, 618, 398, 44 },
+            /* -- card 4: vault -- */
+            { L"STATIC",  L"笔记库文件夹（文件树 / 知识图谱 / 孤儿笔记的固定范围）",
+              SS_LEFT, 0, 24, 706, 390, 18 },
+            { L"EDIT",    L"", WS_BORDER | ES_AUTOHSCROLL | ES_READONLY
+                              | WS_TABSTOP,
+              210, 24, 728, 300, 26 },
+            { L"BUTTON",  L"更改…", BS_OWNERDRAW | WS_TABSTOP,
+              212, 332, 728, 100, 26 },
+            { L"BUTTON",  L"跟随文档", BS_OWNERDRAW | WS_TABSTOP,
+              213, 24, 762, 100, 26 },
             /* -- footer buttons -- */
             { L"BUTTON",  L"确定", BS_OWNERDRAW | BS_DEFPUSHBUTTON
                               | WS_TABSTOP,
-              108, 238, 688, 88, 32 },
+              108, 238, 812, 88, 32 },
             { L"BUTTON",  L"取消", BS_OWNERDRAW | WS_TABSTOP,
-              109, 334, 688, 88, 32 },
+              109, 334, 812, 88, 32 },
         };
         const int NITEMS = (int)(sizeof(items) / sizeof(items[0]));
         for (int i = 0; i < NITEMS; i++) {
@@ -4545,6 +4587,7 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         wsprintfW(rnum, L"%d", g_aiRounds);
         SetDlgItemTextW(h, 208, rnum);
         CheckDlgButton(h, 111, g_indentRet ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemTextW(h, 210, g_vaultDir);
         wchar_t txt[64];
         HkText(txt, 64, g_dlgMod, g_dlgVk);
         SetWindowTextW(g_hkEdit, txt);
@@ -4563,6 +4606,7 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             { L"常规",                        { 12,  12, 434, 156 } },
             { L"AI 助手 · 行首 / 调用",        { 12, 170, 434, 500 } },
             { L"Agent · 行首 // 调用",         { 12, 514, 434, 674 } },
+            { L"笔记库",                        { 12, 688, 434, 796 } },
         };
         SetBkMode(dc, TRANSPARENT);
         for (int i = 0; i < 3; i++) {
@@ -4591,6 +4635,8 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (!d || d->CtlType != ODT_BUTTON) break;
         BOOL sel = (d->itemState & ODS_SELECTED) != 0;
         const wchar_t *label = (d->CtlID == 102) ? L"清除"
+                               : (d->CtlID == 212) ? L"更改…"
+                               : (d->CtlID == 213) ? L"跟随文档"
                                : (d->CtlID == 108) ? L"确定"
                                : L"取消";
         COLORREF fill, txtc, brd;
@@ -4646,6 +4692,16 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         }
+        if (id == 212) {    /* pick vault folder */
+            wchar_t pick[MAX_PATH];
+            if (PickVaultFolder(h, pick, MAX_PATH))
+                SetDlgItemTextW(h, 210, pick);
+            return 0;
+        }
+        if (id == 213) {    /* clear vault: follow the current document */
+            SetDlgItemTextW(h, 210, L"");
+            return 0;
+        }
         if (id == 102) { /* clear hotkey */
             g_dlgVk = 0;
             g_dlgMod = 0;
@@ -4694,6 +4750,10 @@ static LRESULT CALLBACK SetDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             if (hm > 1000) hm = 1000;
             g_dlgHist = hm;
             g_indentRet = IsDlgButtonChecked(h, 111) == BST_CHECKED;
+            wchar_t vault[MAX_PATH] = L"";
+            GetDlgItemTextW(h, 210, vault, MAX_PATH);
+            CfgSetStr(L"Vault", vault);
+            lstrcpynW(g_vaultDir, vault, MAX_PATH);
             g_dlgDone = 1;
             DestroyWindow(h);
             PostThreadMessageW(GetCurrentThreadId(), WM_NULL, 0, 0);
@@ -4768,7 +4828,7 @@ static void ShowSettings(void)
 
     RECT rcMain;
     GetWindowRect(g_hwnd, &rcMain);
-    int dw = SC(446), dh = SC(732)
+    int dw = SC(446), dh = SC(860)
              + GetSystemMetrics(SM_CYCAPTION)
              + GetSystemMetrics(SM_CYFIXEDFRAME) * 2;
     int x = rcMain.left + (rcMain.right - rcMain.left - dw) / 2;
@@ -4804,7 +4864,7 @@ static void ShowSettings(void)
         ApplyHotKey(FALSE);
         ApplyAutoSave();
         SaveSettings();
-        InvalidateRect(g_hwnd, NULL, FALSE);
+        ApplyVault();   /* re-root tree / graph / orphans when vault changed */
     }
 }
 
@@ -5177,6 +5237,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmdLine, int show)
     (void)hPrev;
 
     CfgInit();   /* portable ini detection before any settings access */
+    CfgGetStr(L"Vault", g_vaultDir, MAX_PATH);
+    TreeSetVault(g_vaultDir);
 
     /* single instance: a second launch just surfaces the running one
      * (works for tray-hidden windows too - FindWindow sees hidden) */

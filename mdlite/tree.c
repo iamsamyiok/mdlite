@@ -23,6 +23,7 @@ typedef struct TreeNode {
 
 static TreeNode *g_root;             /* synthetic node for the workspace dir */
 static wchar_t g_wsDir[MAX_PATH];    /* "" = no workspace */
+static wchar_t g_vaultDir[MAX_PATH]; /* "" = follow the current document */
 static BOOL g_shown;
 static int  g_scroll;
 static int  g_hover;                 /* visible row under cursor, -1 none */
@@ -210,7 +211,10 @@ void TreeSync(const wchar_t *docPath)
 {
     wchar_t dir[MAX_PATH];
     dir[0] = 0;
-    if (docPath && docPath[0]) {
+    if (g_vaultDir[0]) {
+        /* vault pinned: tree / graph / orphans always stay inside it */
+        lstrcpynW(dir, g_vaultDir, MAX_PATH);
+    } else if (docPath && docPath[0]) {
         lstrcpynW(dir, docPath, MAX_PATH);
         wchar_t *slash = wcsrchr(dir, L'\\');
         if (slash) *slash = 0;
@@ -1111,4 +1115,17 @@ void TreeForEachFile(void (*cb)(const wchar_t *path, void *ctx), void *ctx)
 {
     if (!g_wsDir[0]) return;
     ForEachDiskRec(g_wsDir, 0, cb, ctx);
+}
+
+void TreeSetVault(const wchar_t *dir)
+{
+    if (dir && dir[0])
+        lstrcpynW(g_vaultDir, dir, MAX_PATH);
+    else
+        g_vaultDir[0] = 0;
+}
+
+const wchar_t *TreeVaultDir(void)
+{
+    return g_vaultDir;
 }

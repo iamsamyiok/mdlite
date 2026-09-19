@@ -1,4 +1,6 @@
-/* MDLite - workspace graph view: nodes = .md files, edges = wiki-links */
+/* MDLite - workspace graph view in 3D space:
+ * nodes = note file names, edges = wiki-links, nothing else.
+ * Orbit with mouse drag, zoom with the wheel, double-click opens. */
 #include <stdio.h>
 #define _WIN32_WINNT 0x0601
 #define _ISOC99_SOURCE
@@ -9,10 +11,9 @@
 #include <math.h>
 #include "mdlite.h"
 
-#define GRAPH_NODE_W  200.0f
-#define GRAPH_NODE_H  28.0f
-#define GRAPH_NODE_WD 200.0f
-#define GRAPH_NODE_HT 28.0f
+#define GRAPH_FOCAL    620.0f   /* perspective focal length */
+#define GRAPH_NEAR     120.0f   /* min view depth           */
+#define GRAPH_RADIUS   13.0f    /* node radius at scale 1.0 */
 
 /* ------------------------------------------------------------------ */
 /* data structures                                                     */
@@ -21,7 +22,8 @@
 typedef struct {
     wchar_t name[80];
     wchar_t path[MAX_PATH];
-    float   x, y;
+    float   x, y, z;
+    float   vx, vy, vz;
     int     inDeg, outDeg;
     BOOL    orphan;
 } GraphNode;
@@ -40,16 +42,18 @@ static GraphEdge *g_edges;
 static int g_nE, g_nECap;
 static int  g_activeFileIdx = -1;
 
-static float g_zoom = 1.0f;
-static float g_offX, g_offY;
+static float g_yaw   = 0.55f;     /* orbit around the Y axis  */
+static float g_pitch = 0.32f;     /* orbit around the X axis  */
+static float g_dist  = 1500.0f;   /* camera distance          */
+static float g_tgtX, g_tgtY, g_tgtZ;   /* look-at target      */
 static int   g_hover = -1;
 static int   g_dragging = -1;
 static POINT g_dragOrigin;
-static int   g_selected = -1;     /* kg-style focus node */
-static BOOL  g_panning = FALSE;   /* empty-space pan */
-static POINT g_panOrigin;
+static int   g_selected = -1;     /* focus node               */
+static BOOL  g_orbiting = FALSE;  /* empty-space drag = orbit */
+static POINT g_orbitOrigin;
 
-/* adjacency lists (neighbors of each node) for focus dimming */
+/* adjacency lists for focus dimming */
 static int **g_adj    = NULL;
 static int  *g_adjN   = NULL;
 static int  *g_adjCap = NULL;
@@ -119,7 +123,8 @@ static int FindOrAddNode(const wchar_t *path, const wchar_t *name)
     int idx = g_nN++;
     lstrcpynW(g_nodes[idx].path, path, MAX_PATH);
     lstrcpynW(g_nodes[idx].name, name, 80);
-    g_nodes[idx].x = 0; g_nodes[idx].y = 0;
+    g_nodes[idx].x = 0; g_nodes[idx].y = 0; g_nodes[idx].z = 0;
+    g_nodes[idx].vx = 0; g_nodes[idx].vy = 0; g_nodes[idx].vz = 0;
     g_nodes[idx].inDeg = 0; g_nodes[idx].outDeg = 0;
     g_nodes[idx].orphan = FALSE;
     return idx;
@@ -127,8 +132,10 @@ static int FindOrAddNode(const wchar_t *path, const wchar_t *name)
 
 static void AddEdge(int from, int to)
 {
+    /* undirected: A→B and B→A are the same visible link */
     for (int i = 0; i < g_nE; i++)
-        if (g_edges[i].from == from && g_edges[i].to == to) return;
+        if ((g_edges[i].from == from && g_edges[i].to == to)
+            || (g_edges[i].from == to && g_edges[i].to == from)) return;
     if (g_nE == g_nECap) {
         g_nECap = g_nECap ? g_nECap * 2 : 16;
         g_edges = (GraphEdge *)realloc(g_edges, g_nECap * sizeof(GraphEdge));
@@ -317,188 +324,247 @@ void GraphBuild(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* layout                                                              */
+/* 3D force-directed layout                                            */
 /* ------------------------------------------------------------------ */
 
 static void GraphLayout(void)
 {
     if (g_nN < 2) {
-        if (g_nN == 1) { g_nodes[0].x = 0; g_nodes[0].y = 0; }
+        if (g_nN == 1) { g_nodes[0].x = 0; g_nodes[0].y = 0; g_nodes[0].z = 0; }
         return;
     }
-    const float R = g_nN <= 8 ? 200.0f : (g_nN <= 24 ? 300.0f : 420.0f);
+    /* init on a fibonacci sphere for an even 3D spread */
+    const float R = g_nN <= 8 ? 320.0f : (g_nN <= 24 ? 480.0f : 640.0f);
+    const float golden = 3.14159265f * (3.0f - sqrtf(5.0f));
     for (int i = 0; i < g_nN; i++) {
-        float a = (2.0f * (float)i * 3.14159265f) / (float)g_nN;
-        g_nodes[i].x = R * cosf(a);
-        g_nodes[i].y = R * sinf(a);
+        float yy = (g_nN == 1) ? 0.0f : 1.0f - 2.0f * (float)i / (float)(g_nN - 1);
+        float rr = sqrtf(1.0f - yy * yy);
+        float th = golden * (float)i;
+        g_nodes[i].x = R * rr * cosf(th);
+        g_nodes[i].y = R * yy;
+        g_nodes[i].z = R * rr * sinf(th);
     }
-    /* Fruchterman-Reingold: repulsion C2/d pushes nodes apart, springs
-     * pull linked nodes toward rest length L. With C2=400 the force
-     * balance sits near 1.4*L so the graph stays inside the viewport. */
-    const float C2 = 400.0f, L = 200.0f, S = 3.5f, MAXV = 8.0f;
-    for (int iter = 0; iter < 25; iter++) {
+    /* Fruchterman-Reingold in 3D: pairwise repulsion, link springs,
+     * weak gravity toward origin. */
+    const float C2 = 600.0f, L = 260.0f, S = 3.5f, MAXV = 11.0f;
+    for (int iter = 0; iter < 35; iter++) {
         float *fx = (float *)calloc(g_nN, sizeof(float));
         float *fy = (float *)calloc(g_nN, sizeof(float));
-        if (!fx || !fy) { free(fx); free(fy); break; }
+        float *fz = (float *)calloc(g_nN, sizeof(float));
+        if (!fx || !fy || !fz) { free(fx); free(fy); free(fz); break; }
         for (int i = 0; i < g_nN; i++) {
             for (int j = i + 1; j < g_nN; j++) {
                 float dx = g_nodes[j].x - g_nodes[i].x;
                 float dy = g_nodes[j].y - g_nodes[i].y;
-                float d2 = dx * dx + dy * dy;
+                float dz = g_nodes[j].z - g_nodes[i].z;
+                float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 < 1.0f) d2 = 1.0f;
                 float d = sqrtf(d2);
                 float f = C2 / d;
                 float invD = 1.0f / d;
-                float fxi = -f * dx * invD;
-                float fyi = -f * dy * invD;
-                fx[i] += fxi; fy[i] += fyi;
-                fx[j] -= fxi; fy[j] -= fyi;
+                f *= invD;   /* f = C2 / d^2 along the axis */
+                fx[i] -= f * dx; fy[i] -= f * dy; fz[i] -= f * dz;
+                fx[j] += f * dx; fy[j] += f * dy; fz[j] += f * dz;
             }
         }
         for (int e = 0; e < g_nE; e++) {
             int a = g_edges[e].from, b = g_edges[e].to;
             float dx = g_nodes[b].x - g_nodes[a].x;
             float dy = g_nodes[b].y - g_nodes[a].y;
-            float d = sqrtf(dx * dx + dy * dy);
+            float dz = g_nodes[b].z - g_nodes[a].z;
+            float d = sqrtf(dx * dx + dy * dy + dz * dz);
             if (d < 1.0f) d = 1.0f;
             if (d <= L) continue;   /* springs only pull, never push */
             float f = (d - L) / L * S;
-            float ux = dx / d, uy = dy / d;
-            fx[a] += f * ux; fy[a] += f * uy;
-            fx[b] -= f * ux; fy[b] -= f * uy;
+            float ux = dx / d, uy = dy / d, uz = dz / d;
+            fx[a] += f * ux; fy[a] += f * uy; fz[a] += f * uz;
+            fx[b] -= f * ux; fy[b] -= f * uy; fz[b] -= f * uz;
         }
         for (int i = 0; i < g_nN; i++) {
             fx[i] -= g_nodes[i].x * 0.01f;
             fy[i] -= g_nodes[i].y * 0.01f;
+            fz[i] -= g_nodes[i].z * 0.01f;
         }
         for (int i = 0; i < g_nN; i++) {
-            float len = sqrtf(fx[i]*fx[i] + fy[i]*fy[i]);
-            if (len > MAXV) { fx[i] = fx[i]/len*MAXV; fy[i] = fy[i]/len*MAXV; }
+            float len = sqrtf(fx[i]*fx[i] + fy[i]*fy[i] + fz[i]*fz[i]);
+            if (len > MAXV) {
+                fx[i] = fx[i]/len*MAXV;
+                fy[i] = fy[i]/len*MAXV;
+                fz[i] = fz[i]/len*MAXV;
+            }
             g_nodes[i].x += fx[i];
             g_nodes[i].y += fy[i];
-            if (g_nodes[i].x < -1500.0f) g_nodes[i].x = -1500.0f;
-            if (g_nodes[i].x >  1500.0f) g_nodes[i].x =  1500.0f;
-            if (g_nodes[i].y < -1500.0f) g_nodes[i].y = -1500.0f;
-            if (g_nodes[i].y >  1500.0f) g_nodes[i].y =  1500.0f;
+            g_nodes[i].z += fz[i];
+            if (g_nodes[i].x < -1600.0f) g_nodes[i].x = -1600.0f;
+            if (g_nodes[i].x >  1600.0f) g_nodes[i].x =  1600.0f;
+            if (g_nodes[i].y < -1600.0f) g_nodes[i].y = -1600.0f;
+            if (g_nodes[i].y >  1600.0f) g_nodes[i].y =  1600.0f;
+            if (g_nodes[i].z < -1600.0f) g_nodes[i].z = -1600.0f;
+            if (g_nodes[i].z >  1600.0f) g_nodes[i].z =  1600.0f;
         }
         free(fx);
         free(fy);
+        free(fz);
     }
     if (g_activeFileIdx >= 0) {
-        g_offX = -g_nodes[g_activeFileIdx].x;
-        g_offY = -g_nodes[g_activeFileIdx].y;
+        g_tgtX = g_nodes[g_activeFileIdx].x;
+        g_tgtY = g_nodes[g_activeFileIdx].y;
+        g_tgtZ = g_nodes[g_activeFileIdx].z;
+    } else {
+        g_tgtX = g_tgtY = g_tgtZ = 0.0f;
     }
     RebuildAdj();
+}
+
+/* ------------------------------------------------------------------ */
+/* projection                                                          */
+/* ------------------------------------------------------------------ */
+
+/* rotate world -> view (yaw then pitch), perspective-project to client
+ * coordinates. Returns FALSE when the point is behind the camera. */
+static BOOL ProjectPoint(float x, float y, float z, const RECT *rc,
+                         float *sx, float *sy, float *depth, float *scale)
+{
+    float cy = cosf(g_yaw),  sy = sinf(g_yaw);
+    float cp = cosf(g_pitch), sp = sinf(g_pitch);
+    x -= g_tgtX; y -= g_tgtY; z -= g_tgtZ;
+    float x1 =  x * cy - z * sy;
+    float z1 =  x * sy + z * cy;
+    float y1 =  y * cp - z1 * sp;
+    float z2 =  y * sp + z1 * cp;
+    float d = z2 + g_dist;
+    if (d < GRAPH_NEAR) return FALSE;
+    float s = GRAPH_FOCAL / d * 2.4f;
+    float w = (float)(rc->right - rc->left);
+    float h = (float)(rc->bottom - rc->top);
+    *sx = w / 2.0f + x1 * s;
+    *sy = h / 2.0f - y1 * s;
+    *depth = d;
+    *scale = s;
+    return TRUE;
+}
+
+static void MixColor(COLORREF base, COLORREF farc, float t, COLORREF *out)
+{
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    *out = RGB(GetRValue(base)   + (GetRValue(farc)   - GetRValue(base))   * t,
+               GetGValue(base)   + (GetGValue(farc)   - GetGValue(base))   * t,
+               GetBValue(base)   + (GetBValue(farc)   - GetBValue(base))   * t);
 }
 
 /* ------------------------------------------------------------------ */
 /* drawing                                                             */
 /* ------------------------------------------------------------------ */
 
+/* per-frame projected node cache (built by GraphDraw, reused by
+ * GraphHitTest so hit-testing matches what is on screen exactly) */
+static float *g_prX, *g_prY, *g_prD, *g_prS;
+static BOOL  *g_prVis;
+static int    g_prN = 0, g_prCap = 0;
+static RECT   g_prRect;
+
+static void ProjectAll(const RECT *rc)
+{
+    if (g_nN > g_prCap) {
+        int cap = g_nN + 32;
+        g_prX = (float *)realloc(g_prX, cap * sizeof(float));
+        g_prY = (float *)realloc(g_prY, cap * sizeof(float));
+        g_prD = (float *)realloc(g_prD, cap * sizeof(float));
+        g_prS = (float *)realloc(g_prS, cap * sizeof(float));
+        g_prVis = (BOOL *)realloc(g_prVis, cap * sizeof(BOOL));
+        g_prCap = cap;
+    }
+    g_prN = g_nN;
+    g_prRect = *rc;
+    for (int i = 0; i < g_nN; i++)
+        g_prVis[i] = ProjectPoint(g_nodes[i].x, g_nodes[i].y, g_nodes[i].z,
+                                  rc, &g_prX[i], &g_prY[i],
+                                  &g_prD[i], &g_prS[i]);
+}
+
 static void GraphDrawNode(HDC dc, int idx)
 {
+    if (!g_prVis[idx]) return;
     const GraphNode *n = &g_nodes[idx];
-    float nx = n->x - GRAPH_NODE_WD / 2.0f;
-    float ny = n->y - GRAPH_NODE_HT / 2.0f;
-    float nw = GRAPH_NODE_WD, nh = GRAPH_NODE_HT;
+    float sx = g_prX[idx], sy = g_prY[idx];
+    float t = (g_prD[idx] - 300.0f) / 2400.0f;   /* 0 = near, 1 = far */
     BOOL dim = Dimmed(idx);
     BOOL sel = idx == g_selected;
-    HRGN rgn = CreateRoundRectRgn(
-        (int)floorf(nx), (int)floorf(ny),
-        (int)ceilf(nx + nw), (int)ceilf(ny + nh),
-        8, 8);
-    HBRUSH br = CreateSolidBrush(
-        dim ? RGB(0xFB,0xFB,0xFD)
-            : (n->orphan ? RGB(0xFA,0xFA,0xFC)
-            : (idx == g_hover || idx == g_activeFileIdx
-               ? RGB(0xEB,0xF2,0xFF)
-               : RGB(0xF7,0xF7,0xF9))));
-    FillRgn(dc, rgn, br);
-    DeleteObject(br);
-    COLORREF bc = sel                        ? RGB(0x00,0x7A,0xFF)
-               : dim                         ? RGB(0xE2,0xE2,0xE8)
-               : idx == g_activeFileIdx      ? RGB(0x00,0x7A,0xFF)
-               : idx == g_hover              ? RGB(0x90,0xB0,0xFF)
-                                             : RGB(0xCC,0xCC,0xD0);
-    HPEN pen = CreatePen(PS_SOLID, sel ? 2 : 1, bc);
-    HPEN oldPen = (HPEN)SelectObject(dc, pen);
-    SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Rectangle(dc, (int)floorf(nx), (int)floorf(ny),
-              (int)ceilf(nx + nw), (int)ceilf(ny + nh));
-    /* kg-style double ring on the focused node */
-    if (sel) {
-        HPEN pen2 = CreatePen(PS_SOLID, 1, RGB(0x7D,0xD3,0xFC));
-        SelectObject(dc, pen2);
-        Rectangle(dc, (int)floorf(nx) - 4, (int)floorf(ny) - 4,
-                  (int)ceilf(nx + nw) + 4, (int)ceilf(ny + nh) + 4);
-        DeleteObject(pen2);
-    }
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
-    DeleteObject(rgn);
 
+    COLORREF fill, ring, name;
+    if (dim) {
+        MixColor(RGB(0xEE,0xEE,0xF2), RGB(0xF8,0xF8,0xFA), t, &fill);
+        MixColor(RGB(0xDE,0xDE,0xE4), RGB(0xF0,0xF0,0xF4), t, &ring);
+        MixColor(RGB(0xC8,0xC8,0xCE), RGB(0xE4,0xE4,0xE8), t, &name);
+    } else if (idx == g_activeFileIdx || sel) {
+        MixColor(RGB(0x1F,0x6F,0xEB), RGB(0x9E,0xC8,0xFF), t * 0.7f, &fill);
+        MixColor(RGB(0x00,0x53,0xB8), RGB(0x7D,0xB8,0xFC), t * 0.7f, &ring);
+        name = RGB(0x10,0x30,0x60);
+    } else if (idx == g_hover) {
+        MixColor(RGB(0xEB,0xF2,0xFF), RGB(0xF4,0xF8,0xFF), t, &fill);
+        MixColor(RGB(0x90,0xB0,0xFF), RGB(0xC0,0xD4,0xFF), t, &ring);
+        MixColor(RGB(0x22,0x22,0x28), RGB(0x8A,0x8A,0x92), t, &name);
+    } else {
+        MixColor(n->orphan ? RGB(0xF4,0xF4,0xF6) : RGB(0xE9,0xEC,0xF2),
+                 RGB(0xF8,0xF8,0xFA), t, &fill);
+        MixColor(n->orphan ? RGB(0xD8,0xD8,0xDE) : RGB(0xB8,0xC0,0xCE),
+                 RGB(0xEC,0xEC,0xF0), t, &ring);
+        MixColor(RGB(0x33,0x38,0x40), RGB(0xAE,0xAE,0xB6), t, &name);
+    }
+
+    float rad = GRAPH_RADIUS * g_prS[idx];
+    if (rad < 3.0f) rad = 3.0f;
+    if (rad > 22.0f) rad = 22.0f;
+    RECT ball = { (int)(sx - rad), (int)(sy - rad),
+                  (int)(sx + rad), (int)(sy + rad) };
+    HBRUSH br = CreateSolidBrush(fill);
+    HBRUSH ob = (HBRUSH)SelectObject(dc, br);
+    HPEN pn = CreatePen(PS_SOLID, sel ? 2 : 1, ring);
+    HPEN op = (HPEN)SelectObject(dc, pn);
+    Ellipse(dc, ball.left, ball.top, ball.right, ball.bottom);
+    SelectObject(dc, ob);
+    DeleteObject(br);
+    SelectObject(dc, op);
+    DeleteObject(pn);
+
+    /* selection halo */
+    if (sel) {
+        HPEN pn2 = CreatePen(PS_SOLID, 1, RGB(0x7D,0xD3,0xFC));
+        HPEN op2 = (HPEN)SelectObject(dc, pn2);
+        HBRUSH ob2 = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Ellipse(dc, ball.left - 4, ball.top - 4,
+                ball.right + 4, ball.bottom + 4);
+        SelectObject(dc, ob2);
+        DeleteObject(pn2);
+    }
+
+    /* the note file name under the node */
     HFONT oldFont = (HFONT)SelectObject(dc, g_fontHeader);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, dim ? RGB(0xC2,0xC2,0xC8) : RGB(0x22,0x22,0x28));
-    RECT lr;
-    lr.left   = (int)floorf(nx + 8.0f);
-    lr.top    = (int)floorf(ny);
-    lr.right  = (int)ceilf(nx + nw - 8.0f);
-    lr.bottom = (int)ceilf(ny + nh);
+    SetTextColor(dc, name);
+    RECT lr = { (int)(sx - 110.0f), (int)(sy + rad + 2.0f),
+                (int)(sx + 110.0f), (int)(sy + rad + 22.0f) };
     DrawTextW(dc, n->name, -1, &lr,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+              DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(dc, oldFont);
-
-    if (dim) return;   /* fade the badge out with the node */
-
-    /* draw connection count badge */
-    int totalDeg = n->inDeg + n->outDeg;
-    if (totalDeg > 0) {
-        wchar_t badge[16];
-        wsprintfW(badge, L"%d", totalDeg);
-        int tw = (int)lstrlenW(badge);
-        int bw = tw * 7 + 8;
-        int bh = 16;
-        int bx = (int)ceilf(nx + nw) - bw - 4;
-        int by = (int)floorf(ny) - bh - 2;
-        if (by < (int)ny) by = (int)ny;
-        HBRUSH bbr = CreateSolidBrush(idx == g_activeFileIdx
-                                      ? RGB(0x00,0x7A,0xFF)
-                                      : RGB(0x6E,0x6E,0x73));
-        FillRect(dc, &(RECT){bx, by, bx+bw, by+bh}, bbr);
-        DeleteObject(bbr);
-        HFONT of2 = (HFONT)SelectObject(dc, g_fontHeader);
-        SetTextColor(dc, RGB(255,255,255));
-        RECT tr = {bx + 4, by + 2, bx + bw - 4, by + bh - 2};
-        DrawTextW(dc, badge, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SelectObject(dc, of2);
-    }
 }
 
 static void GraphDrawEdge(HDC dc, int ei)
 {
     const GraphEdge *e = &g_edges[ei];
-    const GraphNode *a = &g_nodes[e->from], *b = &g_nodes[e->to];
-    float dx = b->x - a->x, dy = b->y - a->y;
-    float d = sqrtf(dx*dx + dy*dy);
-    if (d < 1.0f) return;
-    float ux = dx/d, uy = dy/d;
-    float hw = GRAPH_NODE_WD/2.0f, hh = GRAPH_NODE_HT/2.0f;
-    float t1 = 1.0f;
-    if (fabsf(ux) > 0.001f) t1 = fminf(t1, hw/fabsf(ux));
-    if (fabsf(uy)  > 0.001f) t1 = fminf(t1, hh/fabsf(uy));
-    float x1 = a->x + ux * t1, y1 = a->y + uy * t1;
-    float t2 = 1.0f;
-    if (fabsf(-ux) > 0.001f) t2 = fminf(t2, hw/fabsf(-ux));
-    if (fabsf(-uy) > 0.001f) t2 = fminf(t2, hh/fabsf(-uy));
-    float x2 = b->x - ux * t2, y2 = b->y - uy * t2;
-
-    BOOL fade = Dimmed(e->from) || Dimmed(e->to);
-    HPEN pen = CreatePen(PS_SOLID, 1,
-                         fade ? RGB(0xEC,0xEC,0xF0) : RGB(0xCC,0xCC,0xD0));
+    int a = e->from, b = e->to;
+    if (!g_prVis[a] || !g_prVis[b]) return;
+    BOOL fade = Dimmed(a) || Dimmed(b);
+    float t = (g_prD[a] + g_prD[b]) / 2.0f;
+    t = (t - 300.0f) / 2400.0f;
+    COLORREF c;
+    if (fade) MixColor(RGB(0xE8,0xE8,0xEC), RGB(0xF4,0xF4,0xF6), t, &c);
+    else      MixColor(RGB(0xB6,0xC2,0xD6), RGB(0xE2,0xE8,0xF0), t, &c);
+    HPEN pen = CreatePen(PS_SOLID, 1, c);
     HPEN oldPen = (HPEN)SelectObject(dc, pen);
-    MoveToEx(dc, (int)floorf(x1), (int)floorf(y1), NULL);
-    LineTo(dc,   (int)floorf(x2), (int)floorf(y2));
+    MoveToEx(dc, (int)g_prX[a], (int)g_prY[a], NULL);
+    LineTo(dc,   (int)g_prX[b], (int)g_prY[b]);
     DeleteObject(pen);
     SelectObject(dc, oldPen);
 }
@@ -517,45 +583,45 @@ void GraphDraw(HDC dc, const RECT *rc)
         SelectObject(dc, oldFont);
         return;
     }
-    XFORM xf;
-    xf.eM11 = g_zoom;   xf.eM12 = 0.0f;
-    xf.eM21 = 0.0f;     xf.eM22 = g_zoom;
-    xf.eDx  = (FLOAT)(rc->right  / 2.0 + g_offX);
-    xf.eDy  = (FLOAT)(rc->bottom / 2.0 + g_offY);
-    /* world transform only works in GM_ADVANCED; in the default
-     * compatible mode SetWorldTransform fails silently and the nodes
-     * end up drawn at raw world coordinates (mostly off-window) */
-    int prevGM = SetGraphicsMode(dc, GM_ADVANCED);
-    SetWorldTransform(dc, &xf);
-    for (int i = 0; i < g_nE; i++) GraphDrawEdge(dc, i);
-    for (int i = 0; i < g_nN; i++) GraphDrawNode(dc, i);
-    XFORM xfId = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f };
-    SetWorldTransform(dc, &xfId);
-    SetGraphicsMode(dc, prevGM);
+    ProjectAll(rc);
+
+    /* edges first, far to near, then nodes far to near (painter) */
+    int *order = (int *)malloc((g_nN + g_nE) * sizeof(int));
+    if (!order) return;
+    for (int i = 0; i < g_nE; i++) order[i] = i;
+    for (int i = 0; i + 1 < g_nE; i++)           /* insertion sort, small n */
+        for (int j = i + 1; j < g_nE; j++) {
+            float dj = (g_prD[g_edges[order[j]].from]
+                        + g_prD[g_edges[order[j]].to]) / 2.0f;
+            float di = (g_prD[g_edges[order[i]].from]
+                        + g_prD[g_edges[order[i]].to]) / 2.0f;
+            if (dj > di) { int t = order[i]; order[i] = order[j]; order[j] = t; }
+        }
+    for (int i = 0; i < g_nE; i++) GraphDrawEdge(dc, order[i]);
+
+    for (int i = 0; i < g_nN; i++) order[i] = i;
+    for (int i = 0; i + 1 < g_nN; i++)
+        for (int j = i + 1; j < g_nN; j++)
+            if (g_prD[order[j]] > g_prD[order[i]]) {
+                int t = order[i]; order[i] = order[j]; order[j] = t;
+            }
+    for (int i = 0; i < g_nN; i++) GraphDrawNode(dc, order[i]);
+    free(order);
 
     HFONT oldFont = (HFONT)SelectObject(dc, g_fontHeader);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(0xAA,0xAA,0xB0));
-    wchar_t zn[32];
-    wsprintfW(zn, L"%d%%", (int)(g_zoom * 100.0f));
-    SIZE sz;
-    GetTextExtentPoint32W(dc, zn, lstrlenW(zn), &sz);
-    RECT zr = { rc->right - sz.cx - SC(10),
-                rc->bottom - sz.cy - SC(8),
-                rc->right - SC(10),
-                rc->bottom - SC(8) };
-    DrawTextW(dc, zn, -1, &zr, DT_RIGHT | DT_TOP | DT_NOCLIP);
     RECT hint = { rc->left + SC(10), rc->bottom - SC(24),
-                  rc->left + SC(360), rc->bottom - SC(8) };
-    DrawTextW(dc, L"拖空白平移 · 滚轮缩放 · 单击聚焦 · 双击打开 · ESC 返回",
+                  rc->left + SC(430), rc->bottom - SC(8) };
+    DrawTextW(dc, L"拖空白旋转 · 滚轮缩放 · 单击聚焦 · 双击打开 · ESC 返回",
               -1, &hint, DT_LEFT | DT_VCENTER | DT_NOCLIP);
 
-    /* kg-style stats badge, top-right: notes / links / orphans */
+    /* stats badge, top-right: notes / links / orphans */
     int orphans = 0;
     for (int i = 0; i < g_nN; i++)
         if (g_nodes[i].orphan) orphans++;
     wchar_t stats[80];
     wsprintfW(stats, L"%d 笔记 · %d 链接 · %d 孤儿", g_nN, g_nE, orphans);
+    SIZE sz;
     GetTextExtentPoint32W(dc, stats, lstrlenW(stats), &sz);
     int bw = sz.cx + SC(20), bh = SC(24);
     int bx = rc->right - bw - SC(10), by = rc->top + SC(8);
@@ -568,39 +634,6 @@ void GraphDraw(HDC dc, const RECT *rc)
     SetTextColor(dc, RGB(0xE8,0xEC,0xF2));
     RECT st = { bx + SC(10), by, bx + bw - SC(10), by + bh };
     DrawTextW(dc, stats, -1, &st, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    /* hover info card (kg tooltip): in/out degree + orphan mark */
-    if (g_hover >= 0 && g_hover < g_nN && g_dragging < 0 && !g_panning) {
-        const GraphNode *hn = &g_nodes[g_hover];
-        wchar_t line1[80], line2[40];
-        wsprintfW(line1, L"链入 %d · 链出 %d", hn->inDeg, hn->outDeg);
-        wsprintfW(line2, L"%s", hn->orphan ? L"孤立笔记" : L"Wiki 链接节点");
-        GetTextExtentPoint32W(dc, line1, lstrlenW(line1), &sz);
-        int c1w = sz.cx;
-        GetTextExtentPoint32W(dc, line2, lstrlenW(line2), &sz);
-        int cw = (c1w > sz.cx ? c1w : sz.cx) + SC(24);
-        int ch = SC(46);
-        int cx = (int)(hn->x * g_zoom + rc->right / 2.0 + g_offX
-                       + GRAPH_NODE_WD * g_zoom / 2.0) + SC(10);
-        int cy = (int)(hn->y * g_zoom + rc->bottom / 2.0 + g_offY) - ch / 2;
-        if (cx + cw > rc->right - SC(8))   /* flip left near the edge */
-            cx = (int)(hn->x * g_zoom + rc->right / 2.0 + g_offX
-                       - GRAPH_NODE_WD * g_zoom / 2.0) - SC(10) - cw;
-        if (cy < rc->top + SC(8))          cy = rc->top + SC(8);
-        if (cy + ch > rc->bottom - SC(8))  cy = rc->bottom - SC(8) - ch;
-        HBRUSH cbbr = CreateSolidBrush(RGB(0x22,0x28,0x33));
-        HBRUSH cfr = CreateSolidBrush(RGB(0x3A,0x44,0x52));
-        RECT cr = { cx, cy, cx + cw, cy + ch };
-        FillRect(dc, &cr, cbbr);
-        FrameRect(dc, &cr, cfr);
-        DeleteObject(cbbr); DeleteObject(cfr);
-        SetTextColor(dc, RGB(0xFF,0xFF,0xFF));
-        RECT t1 = { cx + SC(12), cy + SC(5), cx + cw, cy + SC(23) };
-        DrawTextW(dc, line1, -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        SetTextColor(dc, hn->orphan ? RGB(0xFB,0xBF,0x24) : RGB(0x5E,0xEA,0xD4));
-        RECT t2 = { cx + SC(12), cy + SC(24), cx + cw, cy + SC(42) };
-        DrawTextW(dc, line2, -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
     SelectObject(dc, oldFont);
 }
 
@@ -608,27 +641,26 @@ void GraphDraw(HDC dc, const RECT *rc)
 /* hit-test / interaction                                              */
 /* ------------------------------------------------------------------ */
 
-static void ScreenToModel(int sx, int sy, const RECT *rc, float *mx, float *my)
-{
-    *mx = (float)(sx - rc->right / 2 - g_offX) / g_zoom;
-    *my = (float)(sy - rc->bottom / 2 - g_offY) / g_zoom;
-}
-
-static BOOL PtInNode(int idx, float mx, float my)
-{
-    const GraphNode *n = &g_nodes[idx];
-    return mx >= n->x - GRAPH_NODE_WD/2.0f && mx <= n->x + GRAPH_NODE_WD/2.0f
-        && my >= n->y - GRAPH_NODE_HT/2.0f && my <= n->y + GRAPH_NODE_HT/2.0f;
-}
-
 int GraphHitTest(int px, int py, const RECT *rc)
 {
     if (g_nN == 0) return -1;
-    float mx, my;
-    ScreenToModel(px, py, rc, &mx, &my);
-    for (int i = g_nN - 1; i >= 0; i--)
-        if (PtInNode(i, mx, my)) return i;
-    return -1;
+    if (g_prN != g_nN
+        || memcmp(&g_prRect, rc, sizeof(RECT)) != 0)
+        ProjectAll(rc);          /* stay valid when called before a paint */
+    int best = -1;
+    float bestD = 0.0f;
+    for (int i = 0; i < g_nN; i++) {
+        if (!g_prVis[i]) continue;
+        float rad = GRAPH_RADIUS * g_prS[i] + 4.0f;
+        if (rad < 8.0f) rad = 8.0f;
+        float dx = (float)px - g_prX[i];
+        float dy = (float)py - g_prY[i];
+        if (dx * dx + dy * dy <= rad * rad
+            && (best < 0 || g_prD[i] < bestD)) {
+            best = i; bestD = g_prD[i];
+        }
+    }
+    return best;
 }
 
 BOOL GraphDragStart(int px, int py, const RECT *rc)
@@ -644,10 +676,15 @@ BOOL GraphDragStart(int px, int py, const RECT *rc)
 void GraphDragMove(int px, int py)
 {
     if (g_dragging < 0) return;
-    int dx = px - g_dragOrigin.x;
-    int dy = py - g_dragOrigin.y;
-    g_nodes[g_dragging].x += (float)dx / g_zoom;
-    g_nodes[g_dragging].y += (float)dy / g_zoom;
+    /* move the node in the camera plane (view axes mapped back to world) */
+    float s = (g_dragging >= 0 && g_dragging < g_prN && g_prS[g_dragging] > 0.001f)
+              ? g_prS[g_dragging] : 1.0f;
+    float dx = (float)(px - g_dragOrigin.x) / s;
+    float dy = (float)(py - g_dragOrigin.y) / s;
+    float cy = cosf(g_yaw), sy = sinf(g_yaw);
+    g_nodes[g_dragging].x += dx * cy;
+    g_nodes[g_dragging].z += -dx * sy;
+    g_nodes[g_dragging].y += -dy;
     g_dragOrigin.x = px;
     g_dragOrigin.y = py;
 }
@@ -659,46 +696,40 @@ void GraphDragEnd(void)
 
 void GraphZoomBy(int deltaUnits)
 {
-    g_zoom *= 1.0f + deltaUnits * 0.10f;
-    if (g_zoom < 0.2f) g_zoom = 0.2f;
-    if (g_zoom > 5.0f) g_zoom = 5.0f;
+    g_dist *= 1.0f - deltaUnits * 0.10f;
+    if (g_dist < 320.0f) g_dist = 320.0f;
+    if (g_dist > 9000.0f) g_dist = 9000.0f;
 }
 
-/* zoom keeping the model point under the cursor pinned in place
- * (kg map-style anchored zoom) */
+/* zoom keeping the point under the cursor pinned in place */
 void GraphZoomByAt(int deltaUnits, int px, int py, const RECT *rc)
 {
-    float mx, my;
-    ScreenToModel(px, py, rc, &mx, &my);
-    float old = g_zoom;
-    g_zoom *= 1.0f + deltaUnits * 0.10f;
-    if (g_zoom < 0.2f) g_zoom = 0.2f;
-    if (g_zoom > 5.0f) g_zoom = 5.0f;
-    if (g_zoom == old) return;
-    g_offX = (float)px - mx * g_zoom;
-    g_offY = (float)py - my * g_zoom;
+    (void)px; (void)py; (void)rc;
+    GraphZoomBy(deltaUnits);   /* 3D orbit zoom is always around the target */
 }
 
-/* empty-space pan */
+/* empty-space drag = orbit the camera */
 void GraphPanStart(int px, int py)
 {
-    g_panning = TRUE;
-    g_panOrigin.x = px;
-    g_panOrigin.y = py;
+    g_orbiting = TRUE;
+    g_orbitOrigin.x = px;
+    g_orbitOrigin.y = py;
 }
 
 void GraphPanMove(int px, int py)
 {
-    if (!g_panning) return;
-    g_offX += (float)(px - g_panOrigin.x);
-    g_offY += (float)(py - g_panOrigin.y);
-    g_panOrigin.x = px;
-    g_panOrigin.y = py;
+    if (!g_orbiting) return;
+    g_yaw += (float)(px - g_orbitOrigin.x) * 0.008f;
+    g_pitch += (float)(py - g_orbitOrigin.y) * 0.006f;
+    if (g_pitch > 1.45f) g_pitch = 1.45f;
+    if (g_pitch < -1.45f) g_pitch = -1.45f;
+    g_orbitOrigin.x = px;
+    g_orbitOrigin.y = py;
 }
 
 void GraphPanEnd(void)
 {
-    g_panning = FALSE;
+    g_orbiting = FALSE;
 }
 
 /* kg-style focus selection */
@@ -720,20 +751,27 @@ void GraphSetHover(int idx)
 
 void GraphResetView(void)
 {
-    g_zoom = 1.0f;
-    g_offX = 0.0f;
-    g_offY = 0.0f;
+    g_yaw = 0.55f;
+    g_pitch = 0.32f;
+    g_dist = 1500.0f;
     if (g_activeFileIdx >= 0) {
-        g_offX = -g_nodes[g_activeFileIdx].x;
-        g_offY = -g_nodes[g_activeFileIdx].y;
+        g_tgtX = g_nodes[g_activeFileIdx].x;
+        g_tgtY = g_nodes[g_activeFileIdx].y;
+        g_tgtZ = g_nodes[g_activeFileIdx].z;
+    } else {
+        g_tgtX = g_tgtY = g_tgtZ = 0.0f;
     }
 }
 
-float GraphGetZoom(void) { return g_zoom; }
+float GraphGetZoom(void)
+{
+    return 1400.0f / g_dist;   /* 1.0 at the default distance */
+}
+
 void  GraphGetOffset(float *ox, float *oy)
 {
-    if (ox) *ox = g_offX;
-    if (oy) *oy = g_offY;
+    if (ox) *ox = g_tgtX;
+    if (oy) *oy = g_tgtY;
 }
 
 BOOL GraphNodePath(int idx, wchar_t *out, int outCap)
