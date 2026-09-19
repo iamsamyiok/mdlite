@@ -45,6 +45,64 @@ static float g_offX, g_offY;
 static int   g_hover = -1;
 static int   g_dragging = -1;
 static POINT g_dragOrigin;
+static int   g_selected = -1;     /* kg-style focus node */
+static BOOL  g_panning = FALSE;   /* empty-space pan */
+static POINT g_panOrigin;
+
+/* adjacency lists (neighbors of each node) for focus dimming */
+static int **g_adj    = NULL;
+static int  *g_adjN   = NULL;
+static int  *g_adjCap = NULL;
+
+static void FreeAdj(void)
+{
+    if (!g_adj) return;
+    for (int i = 0; i < g_nN; i++) free(g_adj[i]);
+    free(g_adj); free(g_adjN); free(g_adjCap);
+    g_adj = NULL; g_adjN = NULL; g_adjCap = NULL;
+}
+
+static void AdjAppend(int a, int b)
+{
+    for (int k = 0; k < g_adjN[a]; k++)
+        if (g_adj[a][k] == b) return;
+    if (g_adjN[a] == g_adjCap[a])
+        g_adjCap[a] *= 2, g_adj[a] = (int *)realloc(g_adj[a], g_adjCap[a] * sizeof(int));
+    g_adj[a][g_adjN[a]++] = b;
+}
+
+static void RebuildAdj(void)
+{
+    FreeAdj();
+    if (g_nN <= 0) return;
+    g_adj    = (int **)calloc(g_nN, sizeof(int *));
+    g_adjN   = (int *)calloc(g_nN, sizeof(int));
+    g_adjCap = (int *)calloc(g_nN, sizeof(int));
+    for (int i = 0; i < g_nN; i++) {
+        g_adjCap[i] = 4;
+        g_adj[i] = (int *)malloc(g_adjCap[i] * sizeof(int));
+    }
+    for (int e = 0; e < g_nE; e++) {
+        int a = g_edges[e].from, b = g_edges[e].to;
+        if (a == b) continue;
+        AdjAppend(a, b);
+        AdjAppend(b, a);
+    }
+}
+
+static BOOL IsNeighbor(int a, int b)
+{
+    if (a < 0 || b < 0 || a >= g_nN) return FALSE;
+    for (int k = 0; k < g_adjN[a]; k++)
+        if (g_adj[a][k] == b) return TRUE;
+    return FALSE;
+}
+
+/* kg-style focus: unselected, unrelated nodes fade out */
+static BOOL Dimmed(int idx)
+{
+    return g_selected >= 0 && idx != g_selected && !IsNeighbor(g_selected, idx);
+}
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -216,12 +274,14 @@ static void FCBAdd(const wchar_t *p, void *ctx)
 
 void GraphBuild(void)
 {
+    FreeAdj();
     free(g_nodes);
     free(g_edges);
     g_nodes = NULL;
     g_edges = NULL;
     g_nN = g_nE = g_nCap = g_nECap = 0;
     g_activeFileIdx = -1;
+    g_selected = -1;
     if (!g_path[0]) return;
 
     FileInfo *files = NULL;
@@ -328,6 +388,7 @@ static void GraphLayout(void)
         g_offX = -g_nodes[g_activeFileIdx].x;
         g_offY = -g_nodes[g_activeFileIdx].y;
     }
+    RebuildAdj();
 }
 
 /* ------------------------------------------------------------------ */
@@ -340,32 +401,45 @@ static void GraphDrawNode(HDC dc, int idx)
     float nx = n->x - GRAPH_NODE_WD / 2.0f;
     float ny = n->y - GRAPH_NODE_HT / 2.0f;
     float nw = GRAPH_NODE_WD, nh = GRAPH_NODE_HT;
+    BOOL dim = Dimmed(idx);
+    BOOL sel = idx == g_selected;
     HRGN rgn = CreateRoundRectRgn(
         (int)floorf(nx), (int)floorf(ny),
         (int)ceilf(nx + nw), (int)ceilf(ny + nh),
         8, 8);
     HBRUSH br = CreateSolidBrush(
-        n->orphan ? RGB(0xFA,0xFA,0xFC)
-                  : (idx == g_hover || idx == g_activeFileIdx
-                     ? RGB(0xEB,0xF2,0xFF)
-                     : RGB(0xF7,0xF7,0xF9)));
+        dim ? RGB(0xFB,0xFB,0xFD)
+            : (n->orphan ? RGB(0xFA,0xFA,0xFC)
+            : (idx == g_hover || idx == g_activeFileIdx
+               ? RGB(0xEB,0xF2,0xFF)
+               : RGB(0xF7,0xF7,0xF9))));
     FillRgn(dc, rgn, br);
     DeleteObject(br);
-    COLORREF bc = idx == g_activeFileIdx ? RGB(0x00,0x7A,0xFF)
-           : idx == g_hover            ? RGB(0x90,0xB0,0xFF)
-                                         : RGB(0xCC,0xCC,0xD0);
-    HPEN pen = CreatePen(PS_SOLID, 1, bc);
+    COLORREF bc = sel                        ? RGB(0x00,0x7A,0xFF)
+               : dim                         ? RGB(0xE2,0xE2,0xE8)
+               : idx == g_activeFileIdx      ? RGB(0x00,0x7A,0xFF)
+               : idx == g_hover              ? RGB(0x90,0xB0,0xFF)
+                                             : RGB(0xCC,0xCC,0xD0);
+    HPEN pen = CreatePen(PS_SOLID, sel ? 2 : 1, bc);
     HPEN oldPen = (HPEN)SelectObject(dc, pen);
     SelectObject(dc, GetStockObject(NULL_BRUSH));
     Rectangle(dc, (int)floorf(nx), (int)floorf(ny),
               (int)ceilf(nx + nw), (int)ceilf(ny + nh));
+    /* kg-style double ring on the focused node */
+    if (sel) {
+        HPEN pen2 = CreatePen(PS_SOLID, 1, RGB(0x7D,0xD3,0xFC));
+        SelectObject(dc, pen2);
+        Rectangle(dc, (int)floorf(nx) - 4, (int)floorf(ny) - 4,
+                  (int)ceilf(nx + nw) + 4, (int)ceilf(ny + nh) + 4);
+        DeleteObject(pen2);
+    }
     SelectObject(dc, oldPen);
     DeleteObject(pen);
     DeleteObject(rgn);
 
     HFONT oldFont = (HFONT)SelectObject(dc, g_fontHeader);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(0x22,0x22,0x28));
+    SetTextColor(dc, dim ? RGB(0xC2,0xC2,0xC8) : RGB(0x22,0x22,0x28));
     RECT lr;
     lr.left   = (int)floorf(nx + 8.0f);
     lr.top    = (int)floorf(ny);
@@ -374,6 +448,8 @@ static void GraphDrawNode(HDC dc, int idx)
     DrawTextW(dc, n->name, -1, &lr,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(dc, oldFont);
+
+    if (dim) return;   /* fade the badge out with the node */
 
     /* draw connection count badge */
     int totalDeg = n->inDeg + n->outDeg;
@@ -417,7 +493,9 @@ static void GraphDrawEdge(HDC dc, int ei)
     if (fabsf(-uy) > 0.001f) t2 = fminf(t2, hh/fabsf(-uy));
     float x2 = b->x - ux * t2, y2 = b->y - uy * t2;
 
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xCC,0xCC,0xD0));
+    BOOL fade = Dimmed(e->from) || Dimmed(e->to);
+    HPEN pen = CreatePen(PS_SOLID, 1,
+                         fade ? RGB(0xEC,0xEC,0xF0) : RGB(0xCC,0xCC,0xD0));
     HPEN oldPen = (HPEN)SelectObject(dc, pen);
     MoveToEx(dc, (int)floorf(x1), (int)floorf(y1), NULL);
     LineTo(dc,   (int)floorf(x2), (int)floorf(y2));
@@ -468,9 +546,61 @@ void GraphDraw(HDC dc, const RECT *rc)
                 rc->bottom - SC(8) };
     DrawTextW(dc, zn, -1, &zr, DT_RIGHT | DT_TOP | DT_NOCLIP);
     RECT hint = { rc->left + SC(10), rc->bottom - SC(24),
-                  rc->left + SC(200), rc->bottom - SC(8) };
-    DrawTextW(dc, L"滚轮缩放  ESC 退出", -1, &hint,
-              DT_LEFT | DT_VCENTER | DT_NOCLIP);
+                  rc->left + SC(360), rc->bottom - SC(8) };
+    DrawTextW(dc, L"拖空白平移 · 滚轮缩放 · 单击聚焦 · 双击打开 · ESC 返回",
+              -1, &hint, DT_LEFT | DT_VCENTER | DT_NOCLIP);
+
+    /* kg-style stats badge, top-right: notes / links / orphans */
+    int orphans = 0;
+    for (int i = 0; i < g_nN; i++)
+        if (g_nodes[i].orphan) orphans++;
+    wchar_t stats[80];
+    wsprintfW(stats, L"%d 笔记 · %d 链接 · %d 孤儿", g_nN, g_nE, orphans);
+    GetTextExtentPoint32W(dc, stats, lstrlenW(stats), &sz);
+    int bw = sz.cx + SC(20), bh = SC(24);
+    int bx = rc->right - bw - SC(10), by = rc->top + SC(8);
+    HBRUSH sbbr = CreateSolidBrush(RGB(0x22,0x28,0x33));
+    HBRUSH frameBr = CreateSolidBrush(RGB(0x3A,0x44,0x52));
+    RECT sb = { bx, by, bx + bw, by + bh };
+    FillRect(dc, &sb, sbbr);
+    FrameRect(dc, &sb, frameBr);
+    DeleteObject(sbbr); DeleteObject(frameBr);
+    SetTextColor(dc, RGB(0xE8,0xEC,0xF2));
+    RECT st = { bx + SC(10), by, bx + bw - SC(10), by + bh };
+    DrawTextW(dc, stats, -1, &st, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    /* hover info card (kg tooltip): in/out degree + orphan mark */
+    if (g_hover >= 0 && g_hover < g_nN && g_dragging < 0 && !g_panning) {
+        const GraphNode *hn = &g_nodes[g_hover];
+        wchar_t line1[80], line2[40];
+        wsprintfW(line1, L"链入 %d · 链出 %d", hn->inDeg, hn->outDeg);
+        wsprintfW(line2, L"%s", hn->orphan ? L"孤立笔记" : L"Wiki 链接节点");
+        GetTextExtentPoint32W(dc, line1, lstrlenW(line1), &sz);
+        int c1w = sz.cx;
+        GetTextExtentPoint32W(dc, line2, lstrlenW(line2), &sz);
+        int cw = (c1w > sz.cx ? c1w : sz.cx) + SC(24);
+        int ch = SC(46);
+        int cx = (int)(hn->x * g_zoom + rc->right / 2.0 + g_offX
+                       + GRAPH_NODE_WD * g_zoom / 2.0) + SC(10);
+        int cy = (int)(hn->y * g_zoom + rc->bottom / 2.0 + g_offY) - ch / 2;
+        if (cx + cw > rc->right - SC(8))   /* flip left near the edge */
+            cx = (int)(hn->x * g_zoom + rc->right / 2.0 + g_offX
+                       - GRAPH_NODE_WD * g_zoom / 2.0) - SC(10) - cw;
+        if (cy < rc->top + SC(8))          cy = rc->top + SC(8);
+        if (cy + ch > rc->bottom - SC(8))  cy = rc->bottom - SC(8) - ch;
+        HBRUSH cbbr = CreateSolidBrush(RGB(0x22,0x28,0x33));
+        HBRUSH cfr = CreateSolidBrush(RGB(0x3A,0x44,0x52));
+        RECT cr = { cx, cy, cx + cw, cy + ch };
+        FillRect(dc, &cr, cbbr);
+        FrameRect(dc, &cr, cfr);
+        DeleteObject(cbbr); DeleteObject(cfr);
+        SetTextColor(dc, RGB(0xFF,0xFF,0xFF));
+        RECT t1 = { cx + SC(12), cy + SC(5), cx + cw, cy + SC(23) };
+        DrawTextW(dc, line1, -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, hn->orphan ? RGB(0xFB,0xBF,0x24) : RGB(0x5E,0xEA,0xD4));
+        RECT t2 = { cx + SC(12), cy + SC(24), cx + cw, cy + SC(42) };
+        DrawTextW(dc, line2, -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
     SelectObject(dc, oldFont);
 }
 
@@ -532,6 +662,60 @@ void GraphZoomBy(int deltaUnits)
     g_zoom *= 1.0f + deltaUnits * 0.10f;
     if (g_zoom < 0.2f) g_zoom = 0.2f;
     if (g_zoom > 5.0f) g_zoom = 5.0f;
+}
+
+/* zoom keeping the model point under the cursor pinned in place
+ * (kg map-style anchored zoom) */
+void GraphZoomByAt(int deltaUnits, int px, int py, const RECT *rc)
+{
+    float mx, my;
+    ScreenToModel(px, py, rc, &mx, &my);
+    float old = g_zoom;
+    g_zoom *= 1.0f + deltaUnits * 0.10f;
+    if (g_zoom < 0.2f) g_zoom = 0.2f;
+    if (g_zoom > 5.0f) g_zoom = 5.0f;
+    if (g_zoom == old) return;
+    g_offX = (float)px - mx * g_zoom;
+    g_offY = (float)py - my * g_zoom;
+}
+
+/* empty-space pan */
+void GraphPanStart(int px, int py)
+{
+    g_panning = TRUE;
+    g_panOrigin.x = px;
+    g_panOrigin.y = py;
+}
+
+void GraphPanMove(int px, int py)
+{
+    if (!g_panning) return;
+    g_offX += (float)(px - g_panOrigin.x);
+    g_offY += (float)(py - g_panOrigin.y);
+    g_panOrigin.x = px;
+    g_panOrigin.y = py;
+}
+
+void GraphPanEnd(void)
+{
+    g_panning = FALSE;
+}
+
+/* kg-style focus selection */
+void GraphSelect(int idx)
+{
+    if (idx < -1 || idx >= g_nN) idx = -1;
+    g_selected = idx;
+}
+
+int GraphSelected(void)
+{
+    return g_selected;
+}
+
+void GraphSetHover(int idx)
+{
+    g_hover = (idx >= -1 && idx < g_nN) ? idx : -1;
 }
 
 void GraphResetView(void)

@@ -55,6 +55,7 @@ static int    g_hoverId = -1;   /* header hover: 0 open 1 save 2 history 3 setti
 static DWORD  g_graphLastClickTick = 0;
 static int    g_graphLastClickIdx  = -1;
 static BOOL   g_graphDragging      = FALSE;
+static BOOL   g_graphPanning       = FALSE;
 
 /* zoom levels (percent), cycled with Ctrl+wheel */
 static const int ZOOMS[5] = { 85, 100, 115, 130, 150 };
@@ -154,8 +155,9 @@ static void GetBodyRect(RECT *rc)
     GetClientRect(g_hwnd, rc);
     rc->top += HeaderH() + (g_findShown ? SC(40) : 0);
     rc->bottom -= StatusH();
-    if (TreeShown()) rc->left += TreeWidth();
-    /* graph view ignores tree sidebar (it uses the full body area) */
+    /* graph view uses the full body area (ignores the tree sidebar),
+     * so only inset the tree strip when the tree is actually shown */
+    if (TreeShown() && g_view != VIEW_GRAPH) rc->left += TreeWidth();
 }
 
 /* ------------------------------------------------------------------ */
@@ -927,6 +929,7 @@ void SetView(int v)
         GraphBuild();
         GraphResetView();
         LayoutChildren();
+        SetFocus(g_hwnd);   /* keyboard (Esc etc.) must reach the main window */
         InvalidateRect(g_hwnd, NULL, TRUE);
         return;
     }
@@ -956,6 +959,7 @@ void SetView(int v)
         if (v == VIEW_PREVIEW) {
             ShowWindow(g_edit, SW_HIDE);
             UpdateScroll();
+            SetFocus(g_hwnd);   /* Esc-to-exit must reach the main window */
         } else {
             ShowWindow(g_edit, SW_SHOW);
             ShowScrollBar(g_hwnd, SB_VERT, FALSE);
@@ -3285,16 +3289,19 @@ static void SlPosition(void)
     GetCaretPos(&pt);
     ClientToScreen(g_edit, &pt);
     ScreenToClient(g_hwnd, &pt);
+    /* park the menu at the caret's lower-right: one line below the
+     * insertion point, flush with the slash (no rcBody offset here —
+     * pt is already in main-window client coordinates) */
+    int x = pt.x;
+    int y = pt.y + SC(20);
+    int w = SC(260), hh = g_slHH ? g_slHH : SC(200);
     RECT rcBody;
     GetBodyRect(&rcBody);
-    int x = rcBody.left + pt.x;
-    int y = rcBody.top + pt.y + SC(20);
-    int w = SC(260), hh = g_slHH ? g_slHH : SC(200);
     RECT rcWnd;
     GetWindowRect(g_hwnd, &rcWnd);
     if (x + w > rcBody.right) x = rcBody.right - w;
     if (x < rcBody.left) x = rcBody.left;
-    if (y + hh > rcBody.bottom) y = rcBody.top + pt.y - SC(20) - hh;
+    if (y + hh > rcBody.bottom) y = pt.y - SC(4) - hh;
     if (y < rcBody.top) y = rcBody.top;
     SetWindowPos(g_slWnd, HWND_TOPMOST, x, y, w, hh,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -3823,6 +3830,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
         if (g_view == VIEW_GRAPH && wp == VK_ESCAPE) {
+            if (GraphSelected() >= 0) {   /* 1st Esc clears focus */
+                GraphSelect(-1);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
             SetView(VIEW_EDIT);
             return 0;
         }
@@ -3836,33 +3848,41 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_view == VIEW_GRAPH) {
             RECT rcBody;
             GetBodyRect(&rcBody);
-            int mx = px - rcBody.left, my = py - rcBody.top;
-            int hi = GraphHitTest(mx, my, &rcBody);
+            int hi = GraphHitTest(px, py, &rcBody);
             if (hi >= 0) {
-                if (GraphDragStart(mx, my, &rcBody)) {
-                    g_graphDragging = TRUE;
-                    SetCapture(hwnd);
-                    return 0;
-                }
-                /* detect double-click on node: jump + exit graph */
+                /* double-click on node: jump + exit graph (checked
+                 * before drag start, which always succeeds on a hit) */
                 DWORD now = GetTickCount();
                 if (hi == g_graphLastClickIdx
                     && now - g_graphLastClickTick < GetDoubleClickTime()) {
                     wchar_t path[MAX_PATH];
-                    if (!GraphNodePath(hi, path, MAX_PATH)) break;
-                    g_graphLastClickTick = 0;
-                    g_graphLastClickIdx = -1;
-                    ReleaseCapture();
-                    GraphDragEnd();
-                    SetView(VIEW_EDIT);
-                    LoadFile(path);
-                    return 0;
+                    if (GraphNodePath(hi, path, MAX_PATH)) {
+                        g_graphLastClickTick = 0;
+                        g_graphLastClickIdx = -1;
+                        ReleaseCapture();
+                        GraphDragEnd();
+                        GraphSelect(-1);
+                        SetView(VIEW_EDIT);
+                        LoadFile(path);
+                        return 0;
+                    }
                 }
                 g_graphLastClickTick = now;
                 g_graphLastClickIdx  = hi;
+                GraphSelect(hi);   /* kg-style click-to-focus */
+                InvalidateRect(hwnd, &rcBody, FALSE);
+                if (GraphDragStart(px, py, &rcBody)) {
+                    g_graphDragging = TRUE;
+                    SetCapture(hwnd);
+                }
             } else {
                 g_graphLastClickTick = 0;
                 g_graphLastClickIdx  = -1;
+                GraphSelect(-1);   /* click empty space: clear focus */
+                GraphPanStart(px, py);
+                g_graphPanning = TRUE;
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, &rcBody, FALSE);
             }
             return 0;
         }
@@ -3925,8 +3945,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_view == VIEW_GRAPH) {
                 RECT rcBody;
                 GetBodyRect(&rcBody);
-                if (GraphHitTest(pt.x - rcBody.left, pt.y - rcBody.top,
-                                 &rcBody) >= 0) {
+                if (GraphHitTest(pt.x, pt.y, &rcBody) >= 0) {
                     SetCursor(LoadCursorW(NULL, IDC_HAND));
                     return TRUE;
                 }
@@ -3946,15 +3965,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int py = (short)HIWORD(lp);
             RECT rcBody;
             GetBodyRect(&rcBody);
-            int mx = px - rcBody.left, my = py - rcBody.top;
             if (g_graphDragging) {
-                GraphDragMove(mx, my);
+                GraphDragMove(px, py);
                 InvalidateRect(hwnd, &rcBody, FALSE);
                 return 0;
             }
-            int hi = GraphHitTest(mx, my, &rcBody);
+            if (g_graphPanning) {
+                GraphPanMove(px, py);
+                InvalidateRect(hwnd, &rcBody, FALSE);
+                return 0;
+            }
+            int hi = GraphHitTest(px, py, &rcBody);
             if (hi != g_hoverId) {
                 g_hoverId = hi;
+                GraphSetHover(hi);
                 InvalidateRect(hwnd, &rcBody, FALSE);
             }
             return 0;
@@ -4007,12 +4031,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_splitDrag) {
             g_splitDrag = FALSE;
             ReleaseCapture();
+            SetFocus(g_hwnd);   /* keep Esc alive (wine drops focus) */
             InvalidateRect(hwnd, NULL, FALSE);
         }
         if (g_graphDragging) {
             g_graphDragging = FALSE;
             GraphDragEnd();
             ReleaseCapture();
+            SetFocus(g_hwnd);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        if (g_graphPanning) {
+            g_graphPanning = FALSE;
+            GraphPanEnd();
+            ReleaseCapture();
+            SetFocus(g_hwnd);
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -4053,7 +4086,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_MOUSEWHEEL:
         if (g_view == VIEW_GRAPH) {
-            GraphZoomBy(-((short)HIWORD(wp)) / WHEEL_DELTA);
+            RECT rcBody;
+            GetBodyRect(&rcBody);
+            POINT ptWh = { (short)LOWORD(lp), (short)HIWORD(lp) };
+            ScreenToClient(hwnd, &ptWh);
+            GraphZoomByAt(-((short)HIWORD(wp)) / WHEEL_DELTA,
+                          ptWh.x, ptWh.y, &rcBody);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }

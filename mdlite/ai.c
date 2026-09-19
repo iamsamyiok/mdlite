@@ -3,6 +3,7 @@
 #include "mdlite.h"
 #include "editlogic.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <winhttp.h>
 
@@ -1504,6 +1505,15 @@ LRESULT CALLBACK EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         WikiCompleteCheck(h);
         SlashCompleteCheck(h);
         return r;
+    }
+    /* Esc with no popup alive: hand to the main window (graph/preview
+     * exit); the focused edit would otherwise swallow it silently.
+     * Posted, not sent: a synchronous call would re-enter this very
+     * edit proc when the main window SetFocus()es back the edit. */
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE
+        && !WikiMenuActive() && !SlashMenuActive()) {
+        PostMessageW(g_hwnd, msg, wp, lp);
+        return 0;
     }
     if (msg == WM_KILLFOCUS) {
         HideWikiMenu();
