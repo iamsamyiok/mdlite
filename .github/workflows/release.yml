@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 wine64
+
+      - name: Build
+        working-directory: mdlite
+        run: make MDLite.exe
+
+      - name: Test (wine)
+        working-directory: mdlite
+        run: |
+          export WINEPREFIX=$HOME/.wineprefix WINEDEBUG=-all DISPLAY=
+          make test
+
+      - name: Create Release and upload exe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          sha256sum mdlite/MDLite.exe > MDLite.exe.sha256
+          gh release create "$REF_NAME" \
+            mdlite/MDLite.exe MDLite.exe.sha256 \
+            --verify-tag --generate-notes \
+            --title "MDLite $REF_NAME" \
+            --notes "Windows x64 单文件版。SHA256 见 MDLite.exe.sha256。
+
+  杀软提示：未签名的独立 exe 可能被 Windows Defender / SmartScreen 误报，
+  请核对 SHA256 后选择「更多信息 → 仍要运行」，或向 Microsoft 提交误报申诉。"
