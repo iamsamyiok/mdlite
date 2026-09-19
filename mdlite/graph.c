@@ -580,13 +580,10 @@ void GraphDraw(HDC dc, const RECT *rc)
         SetTextColor(dc, RGB(0x99,0x99,0xA0));
         RECT r = { rc->left, rc->top, rc->right, rc->bottom };
         const wchar_t *msg = TreeVaultDir()[0]
-            ? L"笔记库暂无 .md 笔记。
-在笔记库中新建或保存 .md 文件后即可看到图谱。"
+            ? L"笔记库暂无 .md 笔记。\n在笔记库中新建或保存 .md 文件后即可看到图谱。"
             : g_path[0]
-            ? L"当前工作区暂无 wiki 链接。
-打开或新建 .md 文件后回车即可看到图谱。"
-            : L"未打开文档。
-请先打开或新建一个 .md 文件，或在设置中选择笔记库。";
+            ? L"当前工作区暂无 wiki 链接。\n打开或新建 .md 文件后回车即可看到图谱。"
+            : L"未打开文档。\n请先打开或新建一个 .md 文件，或在设置中选择笔记库。";
         DrawTextW(dc, msg, -1, &r, DT_CENTER | DT_VCENTER | DT_NOCLIP);
         SelectObject(dc, oldFont);
         return;
