@@ -12,6 +12,47 @@ const wchar_t *MonoFaceName(void) { return L"Consolas"; }
 
 static int g_fail = 0;
 
+
+/* ---- file helpers for the backlink tests ---- */
+
+static void BlWriteFile(const wchar_t *path, const wchar_t *w)
+{
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char *u8 = (char *)malloc((size_t)u8len);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, u8, u8len, NULL, NULL);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD written = 0;
+    if (h != INVALID_HANDLE_VALUE) {
+        WriteFile(h, u8, (DWORD)(u8len - 1), &written, NULL);
+        CloseHandle(h);
+    }
+    free(u8);
+}
+
+static BOOL BlReadHas(const wchar_t *path, const wchar_t *needle)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD size = GetFileSize(h, NULL), read = 0;
+    char *u8 = (char *)malloc((size_t)size + 1);
+    BOOL ok = FALSE;
+    if (ReadFile(h, u8, size, &read, NULL)) {
+        u8[read] = 0;
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, u8, (int)read, NULL, 0);
+        wchar_t *w = (wchar_t *)malloc((wlen + 1) * sizeof(wchar_t));
+        MultiByteToWideChar(CP_UTF8, 0, u8, (int)read, w, wlen);
+        w[wlen] = 0;
+        ok = wcsstr(w, needle) != NULL;
+        free(w);
+    }
+    free(u8);
+    CloseHandle(h);
+    return ok;
+}
+
 static void expect(int cond, const char *what)
 {
     printf("%-58s %s\n", what, cond ? "PASS" : "FAIL");
