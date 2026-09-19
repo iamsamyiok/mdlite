@@ -1,0 +1,7 @@
+Python Exception <class 'ModuleNotFoundError'>: No module named 'gdb'
+E:\download6\winlibs\mingw64\bin\gdb.exe: warning: 
+Could not load the Python gdb module from `E:/R/winlibs_staging_ucrt64/inst_gdb-17.2/share/gdb/share/gdb/python'.
+Limited Python support is available from the _gdb module.
+Suggest passing --data-directory=/path/to/gdb/data-directory.
+E:\Desktop\mdlite-src\testnotes\gdb_cmds.txt:4: Error in sourced command file:
+No stack.

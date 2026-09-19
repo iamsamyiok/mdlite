@@ -1,3 +1,1 @@
-# A
-
-see [[B]] here
+﻿link [[B]] and [[C]] now

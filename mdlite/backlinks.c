@@ -332,11 +332,19 @@ typedef struct {
 
 void BacklinksSyncDir(const wchar_t *dir)
 {
-    if (!dir || !dir[0]) return;
+    FILE *dbg = _wfopen(L"bl_debug.log", L"a");
+    if (dbg) fwprintf(dbg, L"enter: dir=%s
+", dir);
+    if (!dir || !dir[0]) { if (dbg) { fwprintf(dbg, L"empty dir
+"); fclose(dbg); } return; }
+    if (dbg) fclose(dbg);
 
     BlList files; files.v = NULL; files.n = files.cap = 0;
     BlWalkRec(&files, dir);
     int nN = files.n;
+    { FILE *dbg = _wfopen(L"bl_debug.log", L"a"); if (dbg) { fwprintf(dbg, L"files=%d
+", nN); for (int i = 0; i < nN; i++) fwprintf(dbg, L"  file: %s
+", files.v[i]); fclose(dbg); } }
     if (nN < 1 || nN > BL_MAXFILES) { BlListFree(&files); return; }
 
     BlNote *notes = (BlNote *)calloc((size_t)nN, sizeof(BlNote));
@@ -390,9 +398,13 @@ void BacklinksSyncDir(const wchar_t *dir)
     }
 
     /* pass 3: rebuild the managed block of every note that changed */
+    { FILE *dbg = _wfopen(L"bl_debug.log", L"a"); if (dbg) fwprintf(dbg, L"pass3
+"); fclose(dbg); }
     for (int i = 0; i < nN; i++) {
         BlNote *nt = &notes[i];
         if (!nt->text) continue;
+        { FILE *dbg = _wfopen(L"bl_debug.log", L"a"); if (dbg) fwprintf(dbg, L"p3 %s want=%d hasBlock=%d
+", notes[i].key, (int)incoming[i].n, nt->markerIdx >= 0); fclose(dbg); }
 
         /* desired entries: sorted alphabetically for stable output */
         BlList want; want.v = NULL; want.n = want.cap = 0;
@@ -469,6 +481,8 @@ void BacklinksSyncDir(const wchar_t *dir)
             n2 += nt->textLen - tailStart;
         }
         nw[n2] = 0;
+        { FILE *dbg = _wfopen(L"bl_debug.log", L"a"); if (dbg) fwprintf(dbg, L"writing %s n2=%d
+", nt->path, n2); fclose(dbg); }
         BlSave(nt->path, nw, nt->hasBom);
 
         free(nw);
