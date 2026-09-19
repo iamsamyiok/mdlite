@@ -5,6 +5,11 @@
 #include <string.h>
 #include "markdown.h"
 
+/* markdown.c renders with the UI/mono faces; the test binaries link
+ * without main.c, so provide the faces directly here. */
+const wchar_t *UiFaceName(void)  { return L"Segoe UI"; }
+const wchar_t *MonoFaceName(void) { return L"Consolas"; }
+
 BOOL ReadAllBytes(const wchar_t *path, char **buf, int *len)
 {
     *buf = NULL;

@@ -4,6 +4,11 @@
 #include "markdown.h"
 #include "editlogic.h"
 
+/* markdown.c renders with the UI/mono faces; the test binaries link
+ * without main.c, so provide the faces directly here. */
+const wchar_t *UiFaceName(void)  { return L"Segoe UI"; }
+const wchar_t *MonoFaceName(void) { return L"Consolas"; }
+
 static int g_fail = 0;
 
 static void expect(int cond, const char *what)
